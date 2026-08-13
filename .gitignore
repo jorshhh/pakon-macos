@@ -34,3 +34,4 @@ __pycache__/
 
 # local python venv for the image tools
 /.venv/
+scratch/

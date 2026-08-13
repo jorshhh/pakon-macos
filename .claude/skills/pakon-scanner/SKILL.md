@@ -216,6 +216,35 @@ propagates to test binaries with correct search dirs.
     binary encoding TBD from captures at known durations.
   - `pakon_replay advance.pakscan [--steps N] [--limit SEC]` drives N frame
     advances. Each step = `a0` → HOST poll loop → `a2`. `--steps` defaults to 1.
+- **F-135+ ("Plus") does NOT work with this client — analysed 2026-08-12; full
+  writeup in `docs/F135_PLUS_NOTES.md`.** Its PICs answer at the `_PLUS`
+  addresses `0x40`/`0x44` (not `0x20`/`0x24`), so every captured F-135
+  sequence NAKs, and `pakon_replay --open`'s hardcoded probe expectations are
+  exactly inverted on a Plus. The open-handshake PIC probes are really the
+  OEM's *model detection* — a driven client should branch on them, not verify
+  them. Command opcodes are largely shared; Plus adds TEC-cooler init,
+  per-channel exposure writes, and a DX sensor. The current owner (Ali) has an
+  F-135+ (serial 16402) plus an extensive OEM RE corpus at
+  `~/projects/Pakon Software/` (see `notes/`), including driver-level Plus
+  captures — TX commands + full EP6 image stream, 4 resolutions/IR modes — in
+  `~/projects/Pakon Software/Pakon datalogger capture/` (decode notes:
+  `notes/ioctl-capture-analysis.md`). The RX/reply direction is the only
+  missing piece. **Those captures are decoded (2026-08-12) — see
+  `docs/F135_PLUS_CAPTURES.md`**: `tools/fx35_datalogger.py` converts them to
+  `resources/f135plus/*.pakscan`; the Plus image stream is per-pixel RGB with
+  stride 3×width (2000/1500/1000 px at Base 16/8/4) plus a trailing IR block
+  when IR is on — `pakon_image.py --linewidth 6000` correctly decoded a
+  Base 16 strip. The 8000-sample default stride is the F-135-with-IR case,
+  not universal. **LIVE ON HARDWARE (2026-08-12): the F-135+ is drivable
+  from macOS.** Cold=`0f05:f235`; `resources/f135.pakfw` is the RIGHT
+  firmware for the Plus too (personality `F235_AA07`→Pakon7.hex, shared
+  F135-family FX2 image; verified byte-identical) and warms it to
+  `0f05:f135`. Plus probe replies confirmed inverted (0x44 present, 0x24
+  absent). `pakon_replay --scan resources/f135plus/init_base16.pakscan`
+  ran the full OEM init 67/67 acked; `PAKON_DEBUG=4` recovers the reply
+  bytes the Windows captures lack. Raw commands need the bridge init first
+  (HostReset/HostSetMode) or they time out. Next: film-fed scan replay. PROTOCOL.md's `07 02 44 01 (present)` annotation is suspected
+  backwards (status 1 = not acked); flagged in place.
 
 ## Dev / sync workflow
 
