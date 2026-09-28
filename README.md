@@ -1,7 +1,8 @@
 # pakon
 
 A cross-platform (Linux + macOS) driver and web app for the Kodak/Pakon
-**F-135** film scanner (and the "Plus" / F-235 / F-335 variants). Unofficial,
+**F-135** film scanner (and the "Plus" / F-235 / F-335 variants — see
+`docs/SCANNER_FAMILY.md` for what differs between the models). Unofficial,
 independent reimplementation built from documented protocol notes, our own USB
 captures, and reverse engineering of the original Windows software for
 interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
