@@ -9,20 +9,47 @@ committed.
 
 ## TL;DR (current)
 
-- The C-41 negative→positive **inversion** is the OEM **"ColNeg" path**
-  (`PIColorCorrectColNegPlanarScan`), a single shared **log-density LUT** plus a
-  3×3+offset crosstalk matrix — **not** the SCP stage (earlier guess), and not a
-  naive `max − raw`. Recovered exactly.
+- The C-41 negative→positive **inversion** is a single shared **log-density
+  LUT**, `out = 3500·log10(16383/in)`, recovered exactly. On the **F-135 line**
+  the OEM follows it with the unit's own **3×10 NegMatrix** from the EEPROM
+  (see "The F-135 OEM colour path" below); the shared 3×3+offset
+  `_ClientColNegMat.txt` path is the F-235's and is never called by `TLB.dll`.
 - The vibrant **JPEG "look"** is the inverted image run through Kodak's **`rpd.pf`
   ICC rendering profile** + a scene-balance/tone pass. The plain **TIFF** is the
   scene-referred positive (no render).
 - `tools/pakon_image.py` now implements **both**: `--invert-c41` (faithful
-  positive) and `--jpeg` (rpd.pf render). It also auto-detects per-zone channel
-  order, registers the trilinear lines, autocrops, and detects frames.
+  positive) and `--jpeg` (rpd.pf render). It also marker-aligns each row,
+  registers the trilinear lines, autocrops, and detects frames.
 - The web service is a **two-stage minilab flow**: prescan → operator confirms
   crops in the browser → high-res export.
 
-## The recovered inversion (the important bit)
+## The F-135 OEM colour path (from `TLB.dll`, 2026-09-28)
+
+What the 135-line engine actually does to colour-negative data
+(`FN_bLoadImageFromBuffer`; details in `docs/TLB_FINDINGS.md`) [C]:
+
+1. The raw stream is calibrated per column (dark subtraction + 16.16 gain that
+   normalises the open gate to 64000) into the 14-bit domain.
+2. **Per-plane density LUT** on planar data: `LUT[i] = 3500·log10(16383/i)`,
+   16384 entries, `LUT[0] = 0x3FFF`.
+3. **Per-unit 3×10 matrix in density space** (NegMatrix from the EEPROM; PosMatrix
+   for slides):
+   `out = m0·R + m1·G + m2·B + m3·R² + m4·G² + m5·B² + m6·RG + m7·BR + m8·GB + m9`,
+   rounded, clamped to 0–4095 (**12-bit** output). Note the term order RG, BR,
+   GB.
+4. Scale/rotate, then the 12-bit RPD / sRGB profiles and Ansel scene balance
+   (roll-level balance over up to 40 pictures).
+
+Film base is not subtracted in the matrix (its constants are positive): the
+light calibration raises scan duty by `10^D` of a nominal base density
+(colour negative R 0.144, G 0.40, B 0.715), so the base is largely neutralised
+optically before the data reaches the LUT [I].
+
+Our `--invert-c41` does not use the matrix: measured Dmin normalisation → LUT
+→ sRGB, which matches the OEM output closely. Adding the per-unit NegMatrix
+(read with `--read-params`) is the natural next step for OEM-faithful colour.
+
+## The recovered inversion LUT
 
 Source: decompiled `PakonIMAu.dll` (`re/out/PakonIMAu.c`) + `Config/ColorCorrection/`.
 The OEM exposes export toggles (PSI "Other Options", classes `CiColorCorrection`
@@ -48,6 +75,9 @@ vs `CiColorCorrectionKodak`):
   density decade. THIS is the tonal flip. (`pakon_image.py:_c41_lut`.)
 - **`_ClientColNegMat.txt`** — a 3×3 + offset dye-crosstalk / orange-mask matrix
   (diag ≈1.1, small negative off-diagonals, offsets [-82.6, -586.9, -707.8]).
+  This is the F-235 engine's matrix; the F-135 uses its per-unit NegMatrix.
+  (The OEM only loads client LUT/matrix files named without the leading
+  underscore, and only when both exist.)
 
 **Correction to the old note:** the **SCP** stage (`AnsSCPLut`, `FUN_10287eb0`) is
 NOT the inversion — it's a per-channel **affine** LUT (`out = i·slope − offset`),
@@ -57,9 +87,9 @@ no characterization curve is involved.
 
 ## What `tools/pakon_image.py` does today
 
-Deinterleave 16-bit LE → **fixed per-zone channel order** → trilinear R/G/B line
-registration → wrap-order de-interleave (whole-roll IR-band case) → autocrop →
-detect frames → per-frame crop → invert/render → TIFF/JPEG.
+Marker-align rows → deinterleave 16-bit LE R,G,B (+ trailing IR block) →
+trilinear R/G/B line registration → autocrop → detect frames → per-frame crop →
+invert/render → TIFF/JPEG.
 
 - **`--invert-c41`** (the faithful positive): per-channel **Dmin** normalisation
   (orange-mask removal / white balance — the film base is measured robustly as a
@@ -74,20 +104,26 @@ detect frames → per-frame crop → invert/render → TIFF/JPEG.
   `--rpd-profile`, `--jpeg-gamma`, `--jpeg-quality`. Profiles live in `profiles/`
   (committed; Kodak © — see `profiles/README.md`).
 
-### Channel order (a fixed constant — was the "purple" bug)
+### Row layout and channel order
 
-The two CCD output taps emit R/G/B in a fixed, zone-specific interleave order. It
-is a **hardware/replay-phase constant, NOT per-scan**:
+Each row is `[width × (R,G,B) | width IR samples]`, 16-bit LE, `width =
+stride/4` with IR on and `stride/3` without. The phase is fixed by the marker
+bit (LSB of one word per line), after which the order is **R, G, B**. Measured
+strides (pakon-reference `image-stream.md`, measured with this project on an
+F-135+):
 
-| zone | interleave |
-|------|-----------|
-| zone0 (after-IR)  | pos0=R, pos1=G, pos2=B  (perm `{r:b, g:r, b:g}`) |
-| zone1 (before-IR) | pos0=B, pos1=R, pos2=G  (identity) |
+| Mode | Samples/row | Visible width |
+|---|---|---|
+| highest, no IR | 6000 | 2000 |
+| medium, no IR | 4500 | 1500 |
+| lowest, no IR | 3000 | 1000 |
+| lowest, IR on | 4000 | 1000 |
+| highest, IR on | 8000 | 2000 (our F-135 captures; unmeasured on the F-135+) |
 
-Verified against OEM refs on two different rolls. `--channel-order fixed`
-(default). Orange-base **auto-detection** (`--channel-order auto`) was tried but is
-unreliable on dark/red-dominant rolls (the bright percentile catches scene
-highlights, not clean film base, and flips G/B → purple cast), so it is opt-in.
+`--linewidth` defaults to 8000 (our captures); pass the stride for other modes.
+The older "per-zone channel order", "B,R,G" and "IR band mid-line / wrap-order"
+models were artefacts of a floating row phase and are superseded (commit
+`7474ea9`).
 
 ### Framing
 
@@ -126,17 +162,14 @@ passes through dye but is blocked by physical dust/scratches). The OEM applies
 Digital ICE via **`DMLDICELib.dll`** (loaded by `CN_CiDLLDigitalIce`; PSI "Use
 Scratch Removal"; `IrChannelSavedInPlanarFile`, `IrCrossTalkFactor`).
 
-**We do neither.** `find_ir_band` locates the IR band only to delimit the visible
-zones (the IR lands mid-line and the image wraps around it), then **discards** it.
-A clean-room ICE (use the IR plane → threshold to a defect mask → inpaint) is a
-possible future feature; the IR data is captured but currently thrown away. Open
-question: whether our ~658-col IR band is a full per-pixel-aligned IR image or a
-narrower readout strip — verify before building on it.
+**We do neither.** The decoder drops the trailing IR block (one IR sample per
+pixel, `width` samples per row). A clean-room ICE (IR plane → defect mask →
+inpaint) is a possible future feature; the IR data is captured but discarded.
 
 ## PROVENANCE
 
 OEM imaging details come from reverse engineering the original Kodak/Pakon Windows
-software (Ghidra decompilation of `PakonIMAu.dll`/`TLA`/`TLC` + inspection of the
+software (Ghidra decompilation of `PakonIMAu.dll`/`TLB` (F-135 engine)/`TLA`/`TLC` + inspection of the
 `Config/ColorCorrection/` data) **for interoperability**. The OEM binaries and the
 decompilation output are third-party copyrighted and are **NOT committed** (working
 copies under `pakon-scanning-software/` and `re/`, git-ignored). The Kodak ICC

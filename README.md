@@ -1,8 +1,8 @@
 # pakon
 
 A cross-platform (Linux + macOS) driver and web app for the Kodak/Pakon
-**F-135** film scanner (and the "Plus" / F-235 / F-335 variants — see
-`docs/SCANNER_FAMILY.md` for what differs between the models). Unofficial,
+**F-135** and **F-135+** film scanners (the F-235 and F-335 are not supported;
+see `docs/SCANNER_FAMILY.md` for what differs between the models). Unofficial,
 independent reimplementation built from documented protocol notes, our own USB
 captures, and reverse engineering of the original Windows software for
 interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
@@ -14,15 +14,29 @@ interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 > that wraps the C tools and image pipeline so any machine on the local network
 > can drive the scanner.
 >
-> The decoder handles both the 4-frame (HiRes) and whole-roll (LowRes) scan
-> modes: IR-band-aware zone splitting, wrap-order de-interleaving, per-zone
-> trilinear registration, fixed per-zone channel order, autocrop, and
-> autocorrelation-based frame detection. It also reproduces the OEM colour:
+> Today the scan itself is driven by **replaying captured OEM command
+> sequences** (`resources/*.pakscan`, `f135.pakfw`). The current goal is a
+> **replay-free client** that builds every command in code; see `STATUS.md`
+> for the roadmap.
+>
+> The decoder marker-aligns each row, registers the trilinear R/G/B lines,
+> autocrops, and detects frames by autocorrelation. It also reproduces the OEM colour:
 > the recovered **C-41 inversion** (a log-density ColNeg LUT) for a faithful
 > positive, and the Kodak **`rpd.pf`** rendering profile for the vibrant JPEG
 > look (see `docs/IMAGING.md`). The web UI is a **minilab-style two-stage
 > flow** — prescan preview → operator confirms each crop in the browser →
 > high-res export.
+
+## Related projects
+
+- [pakon-reference](https://github.com/alibosworth/pakon-reference): public,
+  implementation-agnostic reference for the F-X35 family (EEPROM layout, DX,
+  safety rules). Several of its hardware facts were measured with this project.
+- libpakon (Stefan Dierauf): an independent C++ driver, used as a read-only
+  reference (`docs/LIBPAKON_COMPARISON.md`).
+- The original OEM Windows software, whose F-135 engine `TLB.dll` was
+  reverse-engineered for interoperability (`docs/TLB_FINDINGS.md`). Not
+  redistributed here.
 
 ## Architecture
 
@@ -61,7 +75,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 Produces: static `libpakon`, tools `pakon_probe` and `pakon_replay`, and unit
-tests `test_proto` / `test_hex`.
+tests `test_proto` / `test_hex` / `test_calib`.
 
 ## Usage
 
@@ -181,10 +195,10 @@ as 37+ usable frames). The decoder automatically handles:
   inversion (Negative Lab Pro, darktable negadoctor, …).
 - **Rendered JPEG** (`--jpeg`) — the Kodak `rpd.pf` ICC profile + scene balance +
   a highlight roll-off that keeps detail the OEM blows out. See `docs/IMAGING.md`.
-- **IR (Digital ICE) band** — detected and used to delimit the visible zones,
-  then discarded (we do **not** do scratch removal — see `docs/IMAGING.md`).
-- **Wrap-order de-interleaving**, **per-zone trilinear registration**, and a
-  **fixed per-zone channel order** (the two CCD taps interleave RGB differently).
+- **IR (Digital ICE) block** — the trailing IR samples of each row are dropped
+  (we do **not** do scratch removal — see `docs/IMAGING.md`).
+- **Marker-bit row alignment** (fixes the R,G,B phase per scan) and **trilinear
+  registration** of the R/G/B sensor lines.
 - **Frame detection** — autocorrelation pitch → count → phase-locked comb →
   fixed-width centred crops.
 
@@ -196,7 +210,7 @@ Key decoder options:
 | `--jpeg` | off | also write the `rpd.pf`-rendered JPEG (needs `profiles/rpd.pf`) |
 | `--rotate {90,180,270}` | 0 | rotate each output frame |
 | `--frames N` | auto | optional hard override of the auto-detected count |
-| `--channel-order {fixed,auto,brg}` | fixed | per-zone R/G/B identity (fixed is verified) |
+| `--channel-order {fixed,auto,brg}` | fixed | R/G/B identity after marker alignment (fixed is verified) |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
 | `--autocrop` / `--no-autocrop` | on | strip leader / blank pre-load scan / gate margin |
 | `-o PREFIX` | `frame` | output filename prefix |

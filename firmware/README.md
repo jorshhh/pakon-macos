@@ -62,3 +62,8 @@ boards (NL/NM firmware), which keep their own flash and are not loaded over
 USB at power-on. `PknInit.hex` is the common bootstrap stage downloaded
 first (it implements external-RAM writes for the main image). See
 `docs/F135_PLUS_CAPTURES.md`.
+
+Loading from the `.hex` instead of the captured `.pakfw` is step 1 of the
+replay-free roadmap in `STATUS.md`. Cross-check the personality read (`0xA9`,
+`wIndex 0`) against the cold USB revision before choosing an image: a wrong
+image once lit a fault LED on another project's unit.
