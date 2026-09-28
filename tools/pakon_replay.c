@@ -200,10 +200,16 @@ static int hexbytes(const char *s, uint8_t *out, size_t max);
 /* ---- Film eject: drive the transport until the strip is out ---------------
  * The OEM ends a scan by polling the film out of the transport; a verbatim
  * script replay skips that wait and leaves the strip half-fed. This replays
- * the captured advance block (motor cal -> engage -> advance speed), keeps
- * the motor running for `seconds`, then sends the captured stop pattern
- * (disengage + reg9 speed writes). Works on both models: the motor PIC
- * address is probed (0x44 Plus, 0x24 non-plus), same probe the OEM uses. */
+ * the F-135+ captured advance block (motor speed 0xA5 -> engage 0xA0 -> FPGA
+ * control reg 0 = acquire), keeps the transport running for `seconds`, then
+ * the captured stop (acquire bit cleared -> 0xA2 -> status-LED words). Names
+ * per TLB.dll (docs/REGISTERS.md): 0xA5 is the motor speed, bank 0x82 reg 0 is
+ * the FPGA control word (bit 0 = acquire), bank 0x82 reg 9 the status LEDs.
+ *
+ * F-135+ only. The speed 0x647E (25726) is serial 16402's EEPROM base-4
+ * MotorSpeed; the base F-135 clamps its motor to 400..9500 and has no captured
+ * timed advance, so on a base F-135 this refuses and points at the validated
+ * frame-advance script instead of sending another model's values. */
 /* Motor-running phases must survive Ctrl-C: the first SIGINT skips the rest
  * of the run and falls through to the stop writes instead of killing the
  * process with the drive engaged. Shared with the --scan handler. */
@@ -236,20 +242,30 @@ static int timed_advance_on(pakon_dev *dev, unsigned timeout, unsigned seconds)
         fprintf(stderr, "advance: no motor PIC answered (0x44/0x24)\n");
         return 1;
     }
-    printf("advance: motor PIC at 0x%02x (%s), running transport for %us\n",
-           picm_addr, picm_addr == AD_PICM_PLUS ? "F-135+" : "F-135", seconds);
+    if (picm_addr != AD_PICM_PLUS) {
+        fprintf(stderr,
+                "advance: F-135 detected. The timed --advance replays F-135+ "
+                "captured values\n"
+                "  (motor speed 0x647E, above the F-135's 9500 limit) and is not "
+                "used on this model.\n"
+                "  Use the validated frame advance instead:\n"
+                "    pakon_replay resources/advance.pakscan --steps N\n");
+        return 1;
+    }
+    printf("advance: motor PIC at 0x%02x (F-135+), running transport for %us\n",
+           picm_addr, seconds);
 
-    /* Captured advance block (see docs/F135_PLUS_CAPTURES.md). Frame data is
-     * [addr, payload_len, cmd, payload...]; the type byte selects CMD/WRITE/
-     * READ_STATUS per the confirmed wire format. */
-    const uint8_t motor_cal[]  = {picm_addr, 0x02, 0xa5, 0x7e, 0x64};
-    const uint8_t engage[]     = {picm_addr, 0x00, 0xa0};
-    const uint8_t speed_run[]  = {picm_addr, 0x03, 0x82, 0x00, 0x63, 0x00};
+    /* Captured F-135+ advance block (see docs/F135_PLUS_CAPTURES.md). Frame
+     * data is [addr, payload_len, cmd/reg, payload...]; the type byte selects
+     * CMD/WRITE/READ_STATUS per the confirmed wire format. */
+    const uint8_t motor_speed[] = {picm_addr, 0x02, 0xa5, 0x7e, 0x64};
+    const uint8_t engage[]      = {picm_addr, 0x00, 0xa0};
+    const uint8_t acquire_on[]  = {picm_addr, 0x03, 0x82, 0x00, 0x63, 0x00};
     const uint8_t status_poll[] = {picm_addr};
-    const uint8_t speed_idle[] = {picm_addr, 0x03, 0x82, 0x00, 0x60, 0x00};
-    const uint8_t disengage[]  = {picm_addr, 0x00, 0xa2};
-    const uint8_t stop_a[]     = {picm_addr, 0x03, 0x82, 0x09, 0x17, 0x02};
-    const uint8_t stop_b[]     = {picm_addr, 0x03, 0x82, 0x09, 0x17, 0x00};
+    const uint8_t acquire_off[] = {picm_addr, 0x03, 0x82, 0x00, 0x60, 0x00};
+    const uint8_t disengage[]   = {picm_addr, 0x00, 0xa2};
+    const uint8_t leds_a[]      = {picm_addr, 0x03, 0x82, 0x09, 0x17, 0x02};
+    const uint8_t leds_b[]      = {picm_addr, 0x03, 0x82, 0x09, 0x17, 0x00};
 
     /* From here the motor runs: catch the first Ctrl-C so the stop writes
      * below always execute (a second Ctrl-C kills as usual). */
@@ -257,9 +273,9 @@ static int timed_advance_on(pakon_dev *dev, unsigned timeout, unsigned seconds)
     void (*previous_sigint)(int) = signal(SIGINT, scan_sigint_handler);
 
     int errs = 0;
-    errs += advance_frame(dev, PH_WRITE, motor_cal, sizeof(motor_cal), timeout);
+    errs += advance_frame(dev, PH_WRITE, motor_speed, sizeof(motor_speed), timeout);
     errs += advance_frame(dev, PH_CMD, engage, sizeof(engage), timeout);
-    errs += advance_frame(dev, PH_WRITE, speed_run, sizeof(speed_run), timeout);
+    errs += advance_frame(dev, PH_WRITE, acquire_on, sizeof(acquire_on), timeout);
     for (unsigned elapsed = 0; elapsed < seconds && !scan_interrupted;
          elapsed++) {
         struct timespec pause = {1, 0};
@@ -270,12 +286,13 @@ static int timed_advance_on(pakon_dev *dev, unsigned timeout, unsigned seconds)
     }
     if (scan_interrupted)
         printf("advance: interrupted — stopping the motor before exit\n");
-    /* Stop: reg0 back to its idle value FIRST (the run/stop state lives
-     * there; 0xA2 only releases the drive), then the captured stop tail. */
-    errs += advance_frame(dev, PH_WRITE, speed_idle, sizeof(speed_idle), timeout);
+    /* Stop: clear the FPGA acquire bit FIRST (0xA2 alone leaves the motor
+     * running; the OEM clears it before 0xA2 too), then release the drive and
+     * restore the status LEDs as captured. */
+    errs += advance_frame(dev, PH_WRITE, acquire_off, sizeof(acquire_off), timeout);
     errs += advance_frame(dev, PH_CMD, disengage, sizeof(disengage), timeout);
-    errs += advance_frame(dev, PH_WRITE, stop_a, sizeof(stop_a), timeout);
-    errs += advance_frame(dev, PH_WRITE, stop_b, sizeof(stop_b), timeout);
+    errs += advance_frame(dev, PH_WRITE, leds_a, sizeof(leds_a), timeout);
+    errs += advance_frame(dev, PH_WRITE, leds_b, sizeof(leds_b), timeout);
     signal(SIGINT, previous_sigint);
     printf("advance: done (%d command errors)\n", errs);
     return (errs || scan_interrupted) ? 1 : 0;
@@ -1404,11 +1421,10 @@ static void usage(const char *argv0)
         "  --scan-sm FILE  replay setup spine, then drive the image transfer and\n"
         "                  stop on end-of-roll white (any roll length)\n"
         "  --image OUT   raw image output for --scan/--scan-sm (default pakon_scan.raw)\n"
-        "  --advance     run the film transport for a fixed time to push the\n"
-        "                strip out (standalone, or appended to --scan); probes\n"
-        "                the motor PIC so it works on the F-135 and F-135+\n"
-        "                alike. For frame-positioned advancing use the\n"
-        "                FILE.pakscan mode.\n"
+        "  --advance     F-135+ only: run the film transport for a fixed time\n"
+        "                to push the strip out (standalone, or appended to\n"
+        "                --scan). On an F-135 use the FILE.pakscan advance mode\n"
+        "                (resources/advance.pakscan --steps N).\n"
         "  --advance-seconds N  how long to run the transport (default 15;\n"
         "                a strip already at the exit needs only 1-2)\n"
         "  --drain       after the scan script ends, keep reading 0x86 until done\n"

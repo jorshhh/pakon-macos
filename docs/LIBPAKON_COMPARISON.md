@@ -1,5 +1,12 @@
 # libpakon vs. this project — exploration notes
 
+> **Update 2026-09-28.** Our decoder has since adopted the R,G,B + trailing IR
+> layout and marker-bit alignment described below (commit `7474ea9`). libpakon
+> has no licence file: it remains a read-only reference. Its sequences are
+> transcribed from OEM traces into named functions with computed calibration,
+> which is the model for our replay-free roadmap (`STATUS.md`). Facts from the
+> OEM F-135 engine are in `docs/TLB_FINDINGS.md`.
+
 _Exploration date: 2026-06-03. Subject repo: `/Users/jorge/Desktop/Code/libpakon`
 (`git@github.com:sdierauf/libpakon.git`, branch `main`, HEAD `2035a7e`). This is an
 **independent** clean-room driver for the Kodak/Pakon F-135 — not a fork of ours, no

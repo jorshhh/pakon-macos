@@ -1,5 +1,15 @@
 # F-135+ datalogger captures — decoded (2026-08-12)
 
+> **Update 2026-09-28 (naming and paths).** Command names below follow the
+> older working labels. The OEM F-135 engine (`TLB.dll`, `docs/REGISTERS.md`)
+> names them differently: `0xA5` = motor **speed** (not "SetMotorCalibration");
+> bank `0x82` reg 0 = FPGA **control word**, bit 0 = acquire (not "SetMotorSpeed
+> reg0"); bank `0x82` reg 9 = **status LEDs** (not "reg9 speed"); `0x8A` =
+> **ResetFifos** (not "AcquireLine"); `0x8B`–`0x8F` = lamp/motherboard
+> **temperature thresholds** (not light config / exposure). The
+> `~/projects/Pakon Software/` paths are on Ali Bosworth's machine, not in
+> this repository.
+
 _Working from the four KK-driver capture sessions in
 `~/projects/Pakon Software/Pakon datalogger capture/` (F-135+ serial 16402,
 same physical 4-exposure strip, TLXCD at Base 4/8/16 with IR off, plus Base 4
@@ -170,11 +180,13 @@ before PIC traffic flows.
    - **Film-exit caveat**: the OEM polls the film out of the transport at
      end of scan; open-loop replay blows through that wait, leaving the
      strip partly in the feed. Now built in as `pakon_replay --advance`
-     (standalone or after `--scan`): probes the motor PIC, replays the
-     captured advance block (`SetMotorCalibration` → `EngageFilmDrive
-     0xA0` → `SetMotorSpeed reg0`), runs the transport for a fixed
-     `--advance-seconds` (default 15), then the captured stop pattern
-     (`0xA2` + reg9 speed writes). Time-based for now; a sensor-gated
+     (standalone or after `--scan`, **F-135+ only**): probes the motor PIC,
+     replays the captured advance block (motor speed `0xA5` → engage `0xA0`
+     → FPGA reg 0 acquire on), runs the transport for a fixed
+     `--advance-seconds` (default 15), then the captured stop (acquire off →
+     `0xA2` → status-LED writes). The speed is this unit's EEPROM value and
+     exceeds the base F-135's motor limit, so the tool refuses on a base
+     F-135. Time-based for now; a sensor-gated
      stop needs the film-present byte in the `0x90` reply identified
      first.
 

@@ -21,7 +21,7 @@ open-source FX35 driver source, and libpakon's device catalog.
 | Personality revision | AA07 | AA07 | AA05 | AA08 |
 | PIC bus addresses | 0x20/0x24 | 0x40/0x44 | unknown | unknown |
 | Controller boards | PICL (PL) + PICM (PM), PIC16 | PICL+ (NL) + PICM+ (NM), PIC18 | MC, DX, LP, CD, AP boards | MD, LQ, DY, CE, AP boards |
-| Illumination | lamp | lamp | lamp (LP board) | **LED** (LQ board) |
+| Illumination | **LED** (R, G, B, IR) | **LED** (R, G, B, IR) | lamp (LP board) | **LED** (LQ board) |
 | CCD cooling (TEC) | no | **yes** | unknown | unknown |
 | DX barcode reading | in PICL | in PICL+ | dedicated DX board | dedicated DY board |
 | APS (IX240) film | no | no | yes (AP board) | yes (AP board) |
@@ -121,7 +121,7 @@ Same command dialect, different execution:
 [DOCUMENTED, from `ReadmeF335.txt` unless noted]
 
 - `MD` motor board ("raised limit on motor speed", June 2006), `LQ` **LED
-  illumination board** (the only model not using a lamp), `DY` DX board,
+  illumination board** (the only one of the two large models not using a lamp; the F-135 and F-135+ are LED-lit too), `DY` DX board,
   `CE` CCD board, `AP` APS board.
 - Otherwise the same situation as the F-235: shared host stack, firmware
   `Pakon8.hex` via `AA08`, everything protocol-level unverified.
