@@ -1,5 +1,15 @@
 # Why the F-135+ didn't work with this client — analysis (now resolved)
 
+> **Update 2026-09-28 (naming and paths).** Command names below follow the
+> older working labels. The OEM F-135 engine (`TLB.dll`, `docs/REGISTERS.md`)
+> names them differently: `0xA5` = motor **speed** (not "SetMotorCalibration");
+> bank `0x82` reg 0 = FPGA **control word**, bit 0 = acquire (not "SetMotorSpeed
+> reg0"); bank `0x82` reg 9 = **status LEDs** (not "reg9 speed"); `0x8A` =
+> **ResetFifos** (not "AcquireLine"); `0x8B`–`0x8F` = lamp/motherboard
+> **temperature thresholds** (not light config / exposure). The
+> `~/projects/Pakon Software/` paths are on Ali Bosworth's machine, not in
+> this repository.
+
 > **STATUS 2026-08-12: the F-135+ now works** — firmware load, init, and a
 > full Base 16 scan replay all succeeded on real hardware using its own
 > converted capture scripts (`docs/F135_PLUS_CAPTURES.md`). This document

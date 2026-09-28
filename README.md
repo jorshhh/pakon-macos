@@ -257,9 +257,10 @@ Ctrl-C during a scan is safe: the first one stops the scan and replays the
 captured teardown (motor and acquisition off) before exiting.
 
 Frame-positioned advancing also works
-(`pakon_replay resources/f135plus/advance.pakscan`); both it and
-`--advance` probe the motor controller so the same commands work on either
-model. The **web UI supports the F-135+ too**: it detects the model to pick
+(`pakon_replay resources/f135plus/advance.pakscan`), and it probes the motor
+controller so it runs on either model. `--advance` is **F-135+ only**: it
+replays that unit's captured motor speed, which is above the base F-135's
+limit, so on an F-135 it refuses and points at `resources/advance.pakscan`. The **web UI supports the F-135+ too**: it detects the model to pick
 the scan script and auto-detects each raw's row layout, so the two-stage flow
 works on both. Everything else F-135+ (protocol differences, stream format,
 per-mode parameters) is in `docs/F135_PLUS_CAPTURES.md`.
