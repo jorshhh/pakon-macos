@@ -4,6 +4,25 @@ Living protocol notes are in `docs/PROTOCOL.md`; imaging details in
 `docs/IMAGING.md`; the project skill `.claude/skills/pakon-scanner/SKILL.md` has
 the operational guide. This file is the short "where we left off" snapshot.
 
+_Update 2026-08-12 (F-135+ session, on Ali Bosworth's F-135+ serial 16402): the
+**F-135+ now scans end-to-end on macOS**. Path: convert Ali Bosworth's Windows
+driver-level captures with `tools/fx35_datalogger.py` → `resources/f135plus/
+*.pakscan` → `pakon_probe --load-firmware resources/f135.pakfw` (Pakon7.hex
+is shared across the F135 family, personality `F235_AA07`; verified
+byte-identical) → `pakon_replay --scan resources/f135plus/base16.pakscan`
+pulled a full 210 MB strip → `pakon_image.py --linewidth 6000 --no-ir-lane
+--invert-c41 --jpeg` gave correct 2000×3000 positives. Plus protocol facts
+(addresses 0x40/0x44, inverted presence probes, per-mode row strides) in
+`docs/F135_PLUS_CAPTURES.md` + `docs/F135_PLUS_NOTES.md`. OPEN: live replay
+verified for Base 16 no-IR only (other modes' scripts convert and their
+captured streams decode, but haven't been replayed on hardware); framing
+heuristics (`find_frame_grid` pitch bounds, fixed-3000 crop) are tuned for
+Base 16 and misframe Base 8/4; open-loop replay skips the OEM's film-exit
+polling (eject workaround in F135_PLUS_CAPTURES §6); no scripts exist for
+uncaptured modes (e.g. Base 16 + IR) until a driven backend composes them. The
+web service now detects the model and auto-detects each raw's row layout, so
+its two-stage flow works on the F-135+ as well._
+
 _Last updated: 2026-06-01 (imaging + web session). DONE: recovered the OEM C-41
 inversion (ColNeg log LUT `out=3500*log10(16383/in)` + per-channel Dmin
 normalisation; NOT the SCP stage) and the vibrant JPEG render (Kodak `rpd.pf` ICC
@@ -613,14 +632,14 @@ raw negatives (orange mask intact). Feed to Negative Lab Pro / negadoctor.
 cold=`0F05:F235`/warm=`0F05:F135`; `analyze_capture.py --extract-firmware
 f135.pakfw` extracts the captured FX2 sequence; `pakon_usb_load_firmware`
 replays it and waits for re-enumeration. Confirmed working on the box:
-`--load-firmware f135.pakfw` brought f235→f135, then `--open` reached Idle.
-(`.pakfw` gitignored — regenerate from a capture. Free the device from the VM
+`--load-firmware resources/f135.pakfw` brought f235→f135, then `--open` reached Idle.
+(a `.pakfw` is committed at `resources/f135.pakfw`. Free the device from the VM
 first: shut down the VM / drop the 0f05 USB filter, replug, `lsusb`→0f05:f235.)
 
 To repeat the working test:
 ```sh
 python3 tools/analyze_capture.py /tmp/pakon_scan.pcapng --extract-firmware f135.pakfw
-sudo ./build/pakon_probe --load-firmware f135.pakfw
+sudo ./build/pakon_probe --load-firmware resources/f135.pakfw
 sudo ./build/pakon_probe            # warm f135 + endpoints 0x01/0x81/0x86
 sudo ./build/pakon_replay --open    # reaches Idle
 ```
@@ -642,8 +661,8 @@ bytes, 11719 image reads, 2 late transfer errors (normal, ignored).
 To run a scan: load film, ensure device is operational `f135`, then:
 
 ```sh
-sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw  # Linux
-./build/pakon_replay --scan scan.pakscan --image scan.raw       # macOS
+sudo ./build/pakon_replay --scan resources/scan.pakscan --image scan.raw  # Linux
+./build/pakon_replay --scan resources/scan.pakscan --image scan.raw       # macOS
 ```
 
 ## Film advance — confirmed protocol (2026-05-31)
@@ -654,9 +673,9 @@ Decoded structure: PICL motor-init writes → PICM enable + duration write →
 (finalize/stop). `pakon_replay` now drives this natively:
 
 ```sh
-./build/pakon_replay advance.pakscan            # 1 step, 60 s limit
-./build/pakon_replay advance.pakscan --steps N  # N frame advances
-./build/pakon_replay advance.pakscan --steps N --limit SEC
+./build/pakon_replay resources/advance.pakscan            # 1 step, 60 s limit
+./build/pakon_replay resources/advance.pakscan --steps N  # N frame advances
+./build/pakon_replay resources/advance.pakscan --steps N --limit SEC
 ```
 
 The `02 05 24 02 a5 1c 25` write sets the advance duration; the TLX UI accepts
@@ -708,10 +727,10 @@ python3 tools/analyze_capture.py <cap.pcapng> --bus 1 --device N --commands
 
 # on the scanner box (Linux needs sudo; macOS does not)
 sudo ./build/pakon_probe                         # classify + endpoint map
-sudo ./build/pakon_probe --load-firmware f135.pakfw   # cold f235 → warm f135
+sudo ./build/pakon_probe --load-firmware resources/f135.pakfw   # cold f235 → warm f135
 sudo ./build/pakon_replay --open                 # open handshake to Idle
-sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw  # full scan
-./build/pakon_replay advance.pakscan --steps N   # advance N frames
+sudo ./build/pakon_replay --scan resources/scan.pakscan --image scan.raw  # full scan
+./build/pakon_replay resources/advance.pakscan --steps N   # advance N frames
 
 # decode
 python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4

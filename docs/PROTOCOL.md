@@ -230,6 +230,16 @@ address byte. Examples from the capture:
 04 03 24 00 00       query AD_PICM       -> 07 02 24 00
 ```
 
+> **Mislabel CONFIRMED on real hardware (2026-08-12):** per the status-byte
+> enum above (0 = success/ack, 1 = not acked), the "(present)" annotation is
+> backwards — on this (non-plus) F-135 the PLUS probe (`0x44 -> status 1`)
+> means *absent* and the plain PICM probe (`0x24 -> status 0`) *present*.
+> These probes are the OEM driver's model detection (F-135 vs F-135+): a
+> real F-135+ answers exactly inverted (`0x44 -> 07 02 44 00` present,
+> `0x24 -> 07 02 24 01` absent), which is why the verbatim
+> `pakon_replay --open` expectations fail on a Plus. See
+> `docs/F135_PLUS_NOTES.md` and `docs/F135_PLUS_CAPTURES.md`.
+
 Note the `0x85` in the open packet is a **command/parameter byte, not a
 checksum** (the analogous `04 03 44 00 00` ends in `00`). Checksum (if any) is
 TBD from the full 2218-command sample set in the capture.

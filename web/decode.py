@@ -11,6 +11,7 @@ run the OEM C-41 inversion + rpd.pf render, and write per-frame TIFF/JPEG.
 
 This mirrors a dedicated minilab: detect → operator confirms frames → export.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ if str(_TOOLS) not in sys.path:
     sys.path.insert(0, str(_TOOLS))
 
 from pakon_image import (  # noqa: E402
+    detect_row_layout,
     find_frame_grid,
     invert_c41,
     marker_align,
@@ -36,7 +38,10 @@ from pakon_image import (  # noqa: E402
 )
 
 WORK_DIR = Path("/tmp/pakon_web")
-_LINEWIDTH = 8000
+# Row layout is auto-detected per raw (F-135 vs the F-135+ per-resolution
+# strides); PAKON_LINEWIDTH + PAKON_IR_LANE=0/1 override the detection.
+_LINEWIDTH_OVERRIDE = os.environ.get("PAKON_LINEWIDTH")
+_IR_LANE_OVERRIDE = os.environ.get("PAKON_IR_LANE")
 _REPO = Path(__file__).resolve().parent.parent
 RPD_PROFILE = _REPO / "profiles" / "rpd.pf"
 RIBBON_PATH = WORK_DIR / "ribbon.npy"
@@ -61,13 +66,28 @@ def _build_ribbon(raw_path, emit):
     placed manually in the web UI, so we show the whole ribbon end to end."""
     emit("Loading", 0.0)
     raw = np.memmap(str(raw_path), dtype="<u2", mode="r")
-    lw = _LINEWIDTH
+
+    emit("Detecting row layout", 0.05)
+    if _LINEWIDTH_OVERRIDE:
+        lw = int(_LINEWIDTH_OVERRIDE)
+        has_ir = (_IR_LANE_OVERRIDE != "0") if _IR_LANE_OVERRIDE is not None \
+            else (lw == 8000)
+    else:
+        layout = detect_row_layout(raw)
+        if layout is None:
+            raise ValueError(
+                "could not detect the row layout of this raw (no known stride "
+                "matched); set PAKON_LINEWIDTH (+ PAKON_IR_LANE=0/1) to force")
+        lw, has_ir = layout
+    width = lw // 4 if has_ir else lw // 3
+    emit(f"Layout: {lw} samples/row, {width} px "
+         f"({'RGB+IR' if has_ir else 'RGB'})", 0.08)
+
     lines = raw.size // lw
     img = raw[: lines * lw].reshape(lines, lw)
 
     emit("Aligning rows", 0.10)
     img, _ = marker_align(img)
-    width = lw // 4
     nvis = width * 3
     chans = {"r": img[:, 0:nvis:3], "g": img[:, 1:nvis:3], "b": img[:, 2:nvis:3]}
 

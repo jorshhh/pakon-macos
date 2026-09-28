@@ -21,6 +21,7 @@ const char *pakon_status_str(pakon_status s)
     case PS_HOST_ALGO:    return "host algorithm error";
     case PS_SUCCESS_8:    return "success (8)";
     case PS_BUS_ERROR:    return "bus error";
+    case PS_NONE:         return "no status (reply too short)";
     }
     return "unknown status";
 }

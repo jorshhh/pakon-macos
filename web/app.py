@@ -42,8 +42,13 @@ _RES = Path(os.environ.get("PAKON_RESOURCES", str(_REPO / "resources")))
 
 PROBE_BIN  = _BUILD / "pakon_probe"
 REPLAY_BIN = _BUILD / "pakon_replay"
-PAKFW      = _RES / "f135.pakfw"
-PAKSCAN    = _RES / "36frames.pakscan"
+PAKFW      = _RES / "f135.pakfw"      # same FX2 image for F-135 and F-135+
+# The scan script is model-specific (the two models' PICs live at different
+# bus addresses); the model is detected at scan time via pakon_replay --open.
+# PAKON_PAKSCAN overrides the choice with an explicit script path.
+PAKSCAN_F135     = _RES / "36frames.pakscan"
+PAKSCAN_F135PLUS = _RES / "f135plus" / "base16.pakscan"
+PAKSCAN_OVERRIDE = os.environ.get("PAKON_PAKSCAN")
 
 # ── App & state ───────────────────────────────────────────────────────────────
 
@@ -128,11 +133,50 @@ async def api_firmware():
 
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
+async def _detect_model() -> str | None:
+    """Run pakon_replay --open and parse the detected model. Returns
+    "F-135+"/"F-135", or None when detection fails (device cold/absent)."""
+    proc = await asyncio.create_subprocess_exec(
+        str(REPLAY_BIN), "--open",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await proc.communicate()
+    text = output.decode(errors="replace")
+    if "model detected: F-135+" in text:
+        return "F-135+"
+    if "model detected: F-135 " in text:
+        return "F-135"
+    return None
+
+
 async def _scan_stream(out_dir: Path):
-    for path, label in [(REPLAY_BIN, "pakon_replay binary"), (PAKSCAN, "scan script")]:
-        if not path.exists():
-            yield _sse({"type": "error", "message": f"{label} not found: {path}"})
+    if not REPLAY_BIN.exists():
+        yield _sse({"type": "error",
+                    "message": f"pakon_replay binary not found: {REPLAY_BIN}"})
+        return
+
+    if PAKSCAN_OVERRIDE:
+        pakscan = Path(PAKSCAN_OVERRIDE)
+        yield _sse({"type": "log",
+                    "message": f"Using PAKON_PAKSCAN override: {pakscan}"})
+    else:
+        yield _sse({"type": "log", "message": "Detecting scanner model..."})
+        model = await _detect_model()
+        if model is None:
+            yield _sse({"type": "error",
+                        "message": "could not detect the scanner model (is it "
+                                   "connected and warm?); set PAKON_PAKSCAN to "
+                                   "force a scan script"})
             return
+        pakscan = PAKSCAN_F135PLUS if model == "F-135+" else PAKSCAN_F135
+        yield _sse({"type": "log",
+                    "message": f"Model: {model} — scan script {pakscan.name}"})
+
+    if not pakscan.exists():
+        yield _sse({"type": "error",
+                    "message": f"scan script not found: {pakscan}"})
+        return
 
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +199,7 @@ async def _scan_stream(out_dir: Path):
         out_path.unlink()
 
     proc = await asyncio.create_subprocess_exec(
-        str(REPLAY_BIN), "--scan", str(PAKSCAN), "--image", str(out_path),
+        str(REPLAY_BIN), "--scan", str(pakscan), "--image", str(out_path),
         "--autostop",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,

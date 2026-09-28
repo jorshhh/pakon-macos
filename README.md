@@ -8,7 +8,8 @@ interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 
 > **Status:** Full end-to-end scan works on hardware — firmware load, open
 > handshake, film advance, scan drive, and image decode are all validated on
-> Linux and macOS. The product is a Python web service (FastAPI + browser UI)
+> Linux and macOS, on both the **F-135** and the **F-135+** (the Plus uses
+> its own scripts — see "F-135+ owners" under Usage). The product is a Python web service (FastAPI + browser UI)
 > that wraps the C tools and image pipeline so any machine on the local network
 > can drive the scanner.
 >
@@ -75,10 +76,10 @@ Two file types drive the process:
 - **`.pakfw`** — a firmware replay script extracted from a USB capture of the
   Windows driver performing the firmware load. It contains the exact sequence
   of USB control transfers needed to bring the scanner from cold (`0F05:F235`)
-  to operational (`0F05:F135`). Generate it once from a capture with
-  `analyze_capture.py --extract-firmware`; reuse it every session. Not
-  committed here because it contains Kodak firmware bytes — see
-  `firmware/README.md`.
+  to operational (`0F05:F135`). One ships at `resources/f135.pakfw` (works
+  for the F-135 and F-135+ — same FX2 image); regenerate from your own
+  capture with `analyze_capture.py --extract-firmware` if redistribution is
+  a concern — see `firmware/README.md`.
 
 - **`.pakscan`** — an operation script extracted from a USB capture of the
   Windows driver. Two kinds:
@@ -86,7 +87,7 @@ Two file types drive the process:
     image reads. `pakon_replay --scan` replays it verbatim to drive a real
     scan. Generate with `analyze_capture.py --extract-scan`.
   - **Advance script** — motor command sequence for film transport.
-    `pakon_replay advance.pakscan` replays it and then loops the
+    `pakon_replay resources/advance.pakscan` replays it and then loops the
     start/poll/finalize sequence for as many frames as needed. Generate by
     capturing an advance operation and extracting with `analyze_capture.py`.
 
@@ -105,10 +106,10 @@ the device is already warm (`0f05:f135`) from a previous session, skip step 2.
 
 ```sh
 # Linux (needs privileges for libusb)
-sudo ./build/pakon_probe --load-firmware f135.pakfw
+sudo ./build/pakon_probe --load-firmware resources/f135.pakfw
 
 # macOS (no sudo needed)
-./build/pakon_probe --load-firmware f135.pakfw
+./build/pakon_probe --load-firmware resources/f135.pakfw
 ```
 
 The scanner re-enumerates as `0f05:f135`. Confirm with `--list`.
@@ -126,8 +127,8 @@ Should print `OK` for each step and reach `Idle`.
 To transport film to the desired position (e.g. to the first frame):
 
 ```sh
-./build/pakon_replay advance.pakscan            # advance 1 frame
-./build/pakon_replay advance.pakscan --steps N  # advance N frames
+./build/pakon_replay resources/advance.pakscan            # advance 1 frame
+./build/pakon_replay resources/advance.pakscan --steps N  # advance N frames
 ```
 
 Each step sends the start command, polls until the scanner signals the frame
@@ -142,7 +143,7 @@ TLX software in seconds) and is carried verbatim in the `.pakscan` script — se
 Load film into the scanner, then:
 
 ```sh
-./build/pakon_replay --scan scan.pakscan --image scan.raw
+./build/pakon_replay --scan resources/scan.pakscan --image scan.raw
 ```
 
 Streams ~240 MB per 4-frame strip, or ~1.2 GB for a whole roll. A couple of
@@ -198,6 +199,55 @@ Key decoder options:
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
 | `--autocrop` / `--no-autocrop` | on | strip leader / blank pre-load scan / gate margin |
 | `-o PREFIX` | `frame` | output filename prefix |
+
+### F-135+ owners
+
+The F-135+ works end-to-end (verified on real hardware, 2026-08-12) but uses
+its own scripts and decoder flags — the F-135 `.pakscan` files above will NAK
+on it, because its controllers answer at different bus addresses. The
+differences:
+
+```sh
+# Firmware load is IDENTICAL (the F-135+ uses the same FX2 image):
+./build/pakon_probe --load-firmware resources/f135.pakfw
+
+# The open handshake detects your model:
+./build/pakon_replay --open       # prints "model detected: F-135+"
+
+# Scan with the F-135+ scripts (Base 16, highest quality):
+./build/pakon_replay --scan resources/f135plus/base16.pakscan --image scan.raw
+
+# Decode: F-135+ rows have no trailing IR block when IR is off, and the
+# row stride follows the resolution (Base 16 = 2000 px = 6000 samples):
+python3 tools/pakon_image.py scan.raw --linewidth 6000 --no-ir-lane \
+    --invert-c41 --jpeg
+```
+
+Base 8 / Base 4 scripts are in `resources/f135plus/` too (decode with
+`--linewidth 4500` / `3000`); `base4_ir.pakscan` scans with the IR channel
+(decode with `--linewidth 4000`, keep the default `--ir-lane`). Insert the
+film strip at the feeder *before* starting the scan replay.
+
+The OEM polls the film out of the transport after a scan; verbatim replay
+cannot, so the strip can stop short of the exit. Append `--advance` to the
+scan command to push it out afterwards (a fixed transport run;
+`--advance-seconds` sets the duration, and a strip already at the exit
+needs only 1-2 s), or run it standalone any time a strip is left inside:
+
+```sh
+./build/pakon_replay --advance --advance-seconds 3
+```
+
+Ctrl-C during a scan is safe: the first one stops the scan and replays the
+captured teardown (motor and acquisition off) before exiting.
+
+Frame-positioned advancing also works
+(`pakon_replay resources/f135plus/advance.pakscan`); both it and
+`--advance` probe the motor controller so the same commands work on either
+model. The **web UI supports the F-135+ too**: it detects the model to pick
+the scan script and auto-detects each raw's row layout, so the two-stage flow
+works on both. Everything else F-135+ (protocol differences, stream format,
+per-mode parameters) is in `docs/F135_PLUS_CAPTURES.md`.
 
 ### Debug logging
 

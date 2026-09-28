@@ -76,6 +76,22 @@ int main(void)
         CHECK(pakon_packet_parse(&pkt, bad, 5) == PAKON_ERR_PROTO,
               "reject inconsistent frame (len != 2+count)");
     }
+    {
+        /* a reply too short to carry a status byte must NOT read as success
+         * (pollers break on PS_SUCCESS; a truncated reply is not "ready") */
+        const uint8_t short_reply[] = {0x07, 0x01, 0x10};  /* count 1: addr only */
+        pakon_packet pkt;
+        CHECK(pakon_packet_parse(&pkt, short_reply, 3) == PAKON_OK,
+              "parse short (addr-only) reply");
+        CHECK(pakon_packet_status(&pkt) == PS_NONE,
+              "short reply status is PS_NONE, not PS_SUCCESS");
+    }
+    {
+        /* confirmed wire type values (docs/LIBPAKON_COMPARISON.md §1 +
+         * our own captures) */
+        CHECK(PH_READ == 1 && PH_WRITE == 2 && PH_READ_STATUS == 3 &&
+              PH_CMD == 4 && PH_RESPONSE == 7, "confirmed PH_ type values");
+    }
 
     if (failures) {
         printf("\n%d test(s) FAILED\n", failures);

@@ -156,9 +156,9 @@ propagates to test binaries with correct search dirs.
   `PAKON_COLD_*`/`PAKON_WARM_*` and `pakon_is_warm_id` (f135 only). Approach:
   extract the captured FX2 control-transfer sequence to a `.pakfw` script
   (`analyze_capture.py --extract-firmware`) and replay it verbatim
-  (`pakon_usb_load_firmware` → `pakon_probe --load-firmware f135.pakfw`), then
-  wait for re-enumeration. `.pakfw` holds Kodak bytes → gitignored, regenerate
-  from a capture.
+  (`pakon_usb_load_firmware` → `pakon_probe --load-firmware resources/f135.pakfw`), then
+  wait for re-enumeration. One is COMMITTED at `resources/f135.pakfw`
+  (works for F-135 and F-135+; see firmware/README.md for provenance).
 - **Testing caveat:** the cold device must be on the HOST, not held by the VM
   (disable the VirtualBox USB filter / shut down the VM first).
 - **Phase 5 scan replay IMPLEMENTED (untested on hardware).** Flow mapped:
@@ -214,8 +214,46 @@ propagates to test binaries with correct search dirs.
     in position) → `04 03 24 00 a2` (finalize/stop).
   - Duration parameter bytes `[a5 1c 25]` encode seconds (TLX UI input); exact
     binary encoding TBD from captures at known durations.
-  - `pakon_replay advance.pakscan [--steps N] [--limit SEC]` drives N frame
+  - `pakon_replay resources/advance.pakscan [--steps N] [--limit SEC]` drives N frame
     advances. Each step = `a0` → HOST poll loop → `a2`. `--steps` defaults to 1.
+- **F-135+ ("Plus") WORKS with this client as of 2026-08-12** — via its own
+  converted capture scripts, not the F-135 ones. Full analysis in
+  `docs/F135_PLUS_NOTES.md`, working results in `docs/F135_PLUS_CAPTURES.md`.
+  The F-135 sequences themselves still NAK on a Plus: its PICs answer at the
+  `_PLUS` addresses `0x40`/`0x44` (not `0x20`/`0x24`). `pakon_replay --open`
+  now treats the PIC probes as the model detection they are (status 0 =
+  present) and reports "F-135" or "F-135+" instead of byte-verifying one
+  F-135's replies — verified live on both models. Command opcodes are largely shared; Plus adds TEC-cooler init,
+  per-channel exposure writes, and a DX sensor. Ali Bosworth (who owns this machine) has an
+  F-135+ (serial 16402) plus an extensive OEM RE corpus at
+  `~/projects/Pakon Software/` (see `notes/`), including driver-level Plus
+  captures — TX commands + full EP6 image stream, 4 resolutions/IR modes — in
+  `~/projects/Pakon Software/Pakon datalogger capture/` (decode notes:
+  `notes/ioctl-capture-analysis.md`). The RX/reply direction is the only
+  missing piece. **Those captures are decoded (2026-08-12) — see
+  `docs/F135_PLUS_CAPTURES.md`**: `tools/fx35_datalogger.py` converts them to
+  `resources/f135plus/*.pakscan`; the Plus image stream is per-pixel RGB with
+  stride 3×width (2000/1500/1000 px at Base 16/8/4) plus a trailing IR block
+  when IR is on — `pakon_image.py --linewidth 6000` correctly decoded a
+  Base 16 strip. The 8000-sample default stride is the F-135-with-IR case,
+  not universal. **LIVE ON HARDWARE (2026-08-12): the F-135+ is drivable
+  from macOS.** Cold=`0f05:f235`; `resources/f135.pakfw` is the RIGHT
+  firmware for the Plus too (personality `F235_AA07`→Pakon7.hex, shared
+  F135-family FX2 image; verified byte-identical) and warms it to
+  `0f05:f135`. Plus probe replies confirmed inverted (0x44 present, 0x24
+  absent). `pakon_replay --scan resources/f135plus/init_base16.pakscan`
+  ran the full OEM init 67/67 acked; `PAKON_DEBUG=4` recovers the reply
+  bytes the Windows captures lack. Raw commands need the bridge init first
+  (HostReset/HostSetMode) or they time out. **FIRST FULL F-135+ SCAN
+  COMPLETED same day**: film pre-inserted, `pakon_replay --scan
+  resources/f135plus/base16.pakscan` pulled 210 MB (10270/10270 reads),
+  decoded to correct 2000×3000 positives with `pakon_image.py --linewidth
+  6000 --no-ir-lane --invert-c41` (the `--no-ir-lane` flag was added:
+  width=lw/3 for IR-off Plus rows, vs the lw/4 F-135 default). Known gap:
+  open-loop replay skips the OEM's film-exit polling, leaving the strip in
+  the transport — eject by replaying the captured advance block, sleeping
+  ~15 s, then the A2+reg9 stop pattern (see docs/F135_PLUS_CAPTURES.md §6). PROTOCOL.md's `07 02 44 01 (present)` annotation is suspected
+  backwards (status 1 = not acked); flagged in place.
 
 ## Dev / sync workflow
 

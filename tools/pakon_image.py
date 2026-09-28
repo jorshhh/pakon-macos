@@ -97,6 +97,55 @@ def _srgb_encode(x01):
 
 _G_OF_POS = {0: "r", 1: "g", 2: "b"}  # chans label of each interleave position
 
+# Every row layout seen on real hardware: stride in samples -> whether the row
+# ends in a trailing IR/Digital-ICE block. F-135 always scans with the IR lane
+# (8000 = 2000 px x 4); the F-135+ stride follows the resolution and only
+# carries the IR block when ICE is on (docs/F135_PLUS_CAPTURES.md).
+KNOWN_ROW_LAYOUTS = {
+    8000: True,    # F-135 (2000 px RGB + IR), F-135+ Base 16 with IR
+    6000: False,   # F-135+ Base 16, no IR (2000 px)
+    4500: False,   # F-135+ Base 8, no IR (1500 px)
+    4000: True,    # F-135+ Base 4 with IR (1000 px RGB + IR)
+    3000: False,   # F-135+ Base 4, no IR (1000 px)
+}
+
+
+def detect_row_layout(raw):
+    """Measure a raw stream's row stride by autocorrelation against the known
+    layouts. Returns (linewidth, has_ir_lane) or None when no candidate wins
+    cleanly (e.g. a stream too short or with no image content).
+
+    The true stride and its integer multiples all score high (a lag of two
+    rows correlates as well as one), so among candidates within a small margin
+    of the best score the SMALLEST wins: on a genuine 8000-sample stream the
+    4000 lag lands mid-row and scores low, while on a genuine 4000-sample
+    stream both 4000 and 8000 score high and 4000 is chosen."""
+    total = raw.size
+    window_len = min(2_000_000, total // 2)
+    if window_len < 200_000:
+        return None
+    start = (total - window_len) // 2
+    window = raw[start:start + window_len].astype(np.float64)
+    window -= window.mean()
+
+    scores = {}
+    for lag in KNOWN_ROW_LAYOUTS:
+        if lag * 4 > window_len:
+            continue
+        head, tail = window[:-lag], window[lag:]
+        denominator = np.linalg.norm(head) * np.linalg.norm(tail)
+        if denominator:
+            scores[lag] = float(np.dot(head, tail) / denominator)
+    if not scores:
+        return None
+    best = max(scores.values())
+    if best < 0.6:
+        return None
+    for lag in sorted(scores):
+        if scores[lag] >= best - 0.02:
+            return lag, KNOWN_ROW_LAYOUTS[lag]
+    return None
+
 
 def marker_align(img, min_frac=0.6, sample_rows=3000):
     """Rotate every row so the scanner's per-scanline marker bit sits at column 0
@@ -605,6 +654,12 @@ def main():
     ap.add_argument("raw")
     ap.add_argument("--linewidth", type=int, default=8000,
                     help="samples per scan line (default 8000)")
+    ap.add_argument("--ir-lane", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="row carries a trailing IR/extra block, so width = "
+                         "linewidth/4 (F-135 8000-sample rows; F-135+ scans "
+                         "with IR on). --no-ir-lane for IR-off F-135+ streams "
+                         "where the row is pure RGB and width = linewidth/3.")
     ap.add_argument("--order", default="rgb",
                     help="channel order of the interleave (default rgb)")
     ap.add_argument("--channel-order", default="fixed",
@@ -726,10 +781,13 @@ def main():
     # lw//4 (= 2000 for the F-135's 8000-sample row). [Supersedes the old B,R,G /
     # 2666-px reading, which assumed phase-0 alignment and folded the IR line into
     # the channels.]
-    width = lw // 4
+    # F-135+ IR-off streams have no trailing IR block: the row is width*3 pure
+    # RGB samples (see docs/F135_PLUS_CAPTURES.md), so width = lw//3 there.
+    width = lw // 4 if args.ir_lane else lw // 3
     nvis = width * 3
     chans = {"r": img[:, 0:nvis:3], "g": img[:, 1:nvis:3], "b": img[:, 2:nvis:3]}
-    ir = img[:, nvis:nvis + width]  # trailing IR line (detected + discarded)
+    # The trailing lw//4 samples per row (when --ir-lane) are the IR/Digital
+    # ICE line; nothing downstream consumes it yet, so it is simply not sliced.
     full = float(max(chans["r"][::997].max(), chans["g"][::997].max(),
                      chans["b"][::997].max())) or 1.0
 

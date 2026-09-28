@@ -201,10 +201,14 @@ static int do_probe_open(pakon_ctx *ctx, unsigned timeout)
  * Diagnostic only — NOT used by any matching/classification logic. */
 static const char *device_hint(unsigned vid, unsigned pid)
 {
+    /* PID f235 is the FAMILY bootstrap identity (from the C0 EEPROM), and
+     * f135 the F-135-family operational one — neither names the physical
+     * model. An F-135+ shows exactly these same IDs; the model is only
+     * knowable from the protocol-level PIC presence probes. */
     if (vid == PAKON_WARM_VID && pid == PAKON_WARM_PID)
-        return "  <-- operational Pakon (warm, f135)";
+        return "  <-- operational Pakon (warm; F-135 or F-135+)";
     if (vid == PAKON_COLD_VID && pid == PAKON_COLD_PID)
-        return "  <-- Pakon bootstrap (cold, f235) — needs firmware load";
+        return "  <-- Pakon bootstrap (cold, any F-X35 model) — needs firmware load";
     if (vid == PAKON_VID)
         return "  <-- Pakon vendor (other PID)";
     return "";

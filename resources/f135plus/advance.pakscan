@@ -1,0 +1,7 @@
+# F-135+ film advance prelude (from the Base 4 capture film-feed section,
+# see docs/F135_PLUS_CAPTURES.md). pakon_replay replays this, then drives
+# a0 (engage) -> HOST poll -> a2 (stop) per step with the probed 0x44 address.
+O 02054402a57e64
+O 030144
+O 0206440382006300
+O 030144

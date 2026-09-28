@@ -64,22 +64,26 @@ typedef enum {
     PS_USB_6        = 6,
     PS_HOST_ALGO    = 7,
     PS_SUCCESS_8    = 8,   /* also reported as success in some sequences */
-    PS_BUS_ERROR    = 9
+    PS_BUS_ERROR    = 9,
+    PS_NONE         = 0xFF /* NOT a wire value: pakon_packet_status() sentinel
+                              for a reply too short to carry a status byte.
+                              Never equal to PS_SUCCESS, so a truncated reply
+                              cannot read as success. */
 } pakon_status;
 
 /*
- * Packet type (byte 0). NOTE: the *names* PH_CMD / PH_READ_STATUS / PH_INVALID
- * come from the documentation, but their numeric wire values are NOT yet
- * confirmed from captures. We have *observed* 0x04 on host->device command
- * frames and 0x07 on the device->host reply in the open handshake, but we have
- * not proven those map to these names. Until Phase 3 nails this down from real
- * traffic, the type byte is carried as a raw uint8_t in pakon_packet and these
- * constants are placeholders — do not rely on the values.
+ * Packet type (byte 0). Values CONFIRMED: observed throughout our own F-135
+ * and F-135+ captures/live sessions (docs/PROTOCOL.md,
+ * docs/F135_PLUS_CAPTURES.md) and independently matching libpakon's enum
+ * (docs/LIBPAKON_COMPARISON.md §1). Supersedes the Phase-0 placeholders.
  */
 typedef enum {
-    PH_CMD         = 0,   /* placeholder value — confirm in Phase 3 */
-    PH_READ_STATUS = 1,   /* placeholder value — confirm in Phase 3 */
-    PH_INVALID     = 2    /* placeholder value — confirm in Phase 3 */
+    PH_INVALID     = 0,
+    PH_READ        = 1,   /* host reads N data bytes back (e.g. sensor state) */
+    PH_WRITE       = 2,   /* host writes N data bytes (register/config) */
+    PH_READ_STATUS = 3,   /* 1-byte status poll, no command byte */
+    PH_CMD         = 4,   /* command with no data payload */
+    PH_RESPONSE    = 7    /* device->host reply frame */
 } pakon_ptype;
 
 /*
@@ -151,10 +155,13 @@ static inline uint8_t pakon_packet_addr(const pakon_packet *pkt)
 {
     return pkt->count >= 1 ? pkt->data[0] : 0;
 }
-/* In a device->host reply the status byte follows the address (data[1]). */
+/* In a device->host reply the status byte follows the address (data[1]).
+ * A reply too short to carry one returns PS_NONE (0xFF), never PS_SUCCESS:
+ * pollers that break on PS_SUCCESS must not treat a truncated/garbled reply
+ * as "device ready". */
 static inline uint8_t pakon_packet_status(const pakon_packet *pkt)
 {
-    return pkt->count >= 2 ? pkt->data[1] : 0;
+    return pkt->count >= 2 ? pkt->data[1] : PS_NONE;
 }
 
 #ifdef __cplusplus
