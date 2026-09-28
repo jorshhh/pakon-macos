@@ -52,3 +52,12 @@ add_test(NAME test_hex COMMAND test_hex)
 add_executable(test_calib test/test_calib.c)
 target_link_libraries(test_calib PRIVATE pakon)
 add_test(NAME test_calib COMMAND test_calib)
+
+# EEPROM decoding and mocked read-only transfers require only Python stdlib.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME test_eeprom
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_eeprom.py)
+else()
+  message(STATUS "Python3 not found: offline EEPROM tests are unavailable")
+endif()

@@ -523,7 +523,9 @@
       };
       $('badge').className = 'badge ' + d.state;
       $('dot').className   = 'dot '   + d.state;
-      $('badge-text').textContent = labels[d.state] || d.state;
+      $('badge-text').textContent = d.state === 'unknown' && d.state_error
+        ? `Status unknown — ${d.state_error}`
+        : (labels[d.state] || d.state);
 
       $('fw-card').classList.toggle('hidden', d.state !== 'cold');
       $('scan-card').classList.toggle('hidden', d.state !== 'warm');

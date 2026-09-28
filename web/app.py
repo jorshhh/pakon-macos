@@ -66,16 +66,19 @@ _state: dict = {
 
 # ── Scanner detection ─────────────────────────────────────────────────────────
 
-def _scanner_state() -> str:
+def _scanner_state() -> tuple[str, str | None]:
     try:
         import usb.core  # pyusb
+    except ImportError:
+        return "unknown", "PyUSB is missing from the web server's Python environment. Install web/requirements.txt."
+    try:
         if usb.core.find(idVendor=0x0F05, idProduct=0xF135) is not None:
-            return "warm"
+            return "warm", None
         if usb.core.find(idVendor=0x0F05, idProduct=0xF235) is not None:
-            return "cold"
-        return "disconnected"
-    except Exception:
-        return "unknown"
+            return "cold", None
+        return "disconnected", None
+    except Exception as exc:
+        return "unknown", f"USB detection failed: {exc}"
 
 
 # ── SSE helper ────────────────────────────────────────────────────────────────
@@ -92,8 +95,10 @@ _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 @app.get("/api/status")
 async def api_status():
     sp = _state["scan_path"]
+    scanner_state, scanner_error = _scanner_state()
     return {
-        "state": _scanner_state(),
+        "state": scanner_state,
+        "state_error": scanner_error,
         "scan_file": sp.name if sp else None,
         "scan_bytes": sp.stat().st_size if sp and sp.exists() else 0,
         "out_dir": str(_state["out_dir"]),
