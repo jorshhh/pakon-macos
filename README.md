@@ -75,9 +75,19 @@ ctest --test-dir build --output-on-failure
 ```
 
 Produces: static `libpakon`, tools `pakon_probe` and `pakon_replay`, and unit
-tests `test_proto` / `test_hex` / `test_calib`.
+tests `test_proto` / `test_hex` / `test_calib`. When CMake finds Python 3, ctest
+also runs the offline EEPROM tests (`test_eeprom`, standard library only).
 
 ## Usage
+
+### EEPROM backup and offline decoding
+
+`python3 tools/pakon_eeprom.py decode DIRECTORY` validates and decodes archived
+EEPROM sections without a scanner. `backup NEW_DIRECTORY` reads all four
+primary/backup sections from an already-warm F-135/F-135+, preserving raw files,
+CRC results, decoded fields, and SHA-256 hashes. The new reader is offline-tested;
+hardware validation is pending. See [EEPROM backup](docs/EEPROM_BACKUP.md) before
+using its hardware mode. It does not load firmware or write EEPROM.
 
 ### Overview
 
@@ -286,8 +296,8 @@ browser UI for the full workflow: firmware load, scan, and image processing.
 Any device on the local network can then open it.
 
 ```sh
-pip install fastapi uvicorn python-multipart numpy pillow tifffile
-uvicorn web.app:app --host 0.0.0.0 --port 8000
+python3 -m pip install -r web/requirements.txt
+python3 -m uvicorn web.app:app --host 0.0.0.0 --port 8000
 ```
 
 Open `http://<host>:8000`. The UI shows scanner connection state, loads firmware,

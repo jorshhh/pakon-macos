@@ -34,6 +34,13 @@ Python runtime dependencies (web/requirements.txt)
     under its own permissive license (MIT / BSD / HPND). Not distributed as
     part of this source tree.
 
+test/fixtures/eeprom/
+    Eight unmodified EEPROM section dumps (base F-135 serial 2233, F-135+
+    serial 16402) from Ali Bosworth's pakon-reference, credited contributor
+    Mats Fagerberg. CC BY 4.0, not covered by the AGPL. Used only as offline
+    parser test fixtures. See test/fixtures/eeprom/README.md and LICENSE there
+    for attribution and provenance.
+
 Kodak and Pakon are trademarks of their respective owners. This project is
 reverse-engineered and unofficial, and is not affiliated with or endorsed by
 them.

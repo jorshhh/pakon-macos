@@ -111,7 +111,8 @@ Per 32-byte chunk: vendor OUT `0xA4`, `wValue 0x00A5`, `wIndex 0x1234`, no data;
 then vendor IN `0xA9`, `wValue` = byte offset, `wIndex 0x1234`, `wLength ≤ 32`.
 `wValue 0x00A3` selects the boot EEPROM at `0x51` instead. Read both copies of
 both sections and check the CRCs (layout: pakon-reference `calibration.md`).
-Our unit: type 1350 (base F-135), serial 3054.
+Our unit: type 1350 (base F-135), serial 3054. `tools/pakon_eeprom.py` reads and
+archives all four copies and decodes them; see `docs/EEPROM_BACKUP.md`.
 
 ## Event service (the "housekeeping") [C]
 
