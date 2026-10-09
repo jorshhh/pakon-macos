@@ -129,8 +129,13 @@ The OEM runs a dedicated thread (`Thread_PpbInterrupt`) for the whole session:
 5. Update the status LEDs (FPGA bank `0x82` reg 9) from the result.
 
 This is the traffic our captures show at irregular read indices
-(`02052002060020`, `0103201e90`). The driven `--scan-sm` never sends it, which
-is the most likely reason it dies about 38% into a strip [I, to test].
+(`02052002060020`, `0103201e90`). Without it the driven `--scan-sm` died
+about 38% into a strip; with it (`pakon_cmd_service_events` after every image
+read) a whole strip scanned on serial 3054, 2026-10-09 [C].
+
+In our captures every ack is from LOW, and `0x90` follows 93 of 95 acks
+whatever the status (not only on `0xA4`); `0x84`/`0x88` follow every `0x02`
+and `0x40` ack.
 
 ## Scan (OEM sequence) [C]
 
@@ -189,7 +194,7 @@ The OEM moves film with the motor commands above: set speed (`0xA5`), start
 | `--calibrate` | driven dark-offset loop (works); gain phase sees no light |
 | `--scan FILE` | verbatim replay of a capture; fits a roll the capture's length |
 | `--scan FILE --autostop` | verbatim replay, stops at end-of-roll white, then replays the teardown |
-| `--scan-sm FILE` | replays setup to motor start, then reads without the event service; dies ~38% in |
+| `--scan-sm FILE` | replays setup to motor start, then reads with the event service; scans a whole strip (F-135) |
 | `advance.pakscan --steps N` | replayed advance loop; motor address probed per model (`resources/f135plus/advance.pakscan` for the Plus) |
 | `--advance [--advance-seconds N]` | timed transport run to push a strip out, standalone or after `--scan`; model-specific captured speed |
 | Ctrl-C during `--scan`/`--advance` | first press stops and replays the teardown / stop writes; the run reports failure |

@@ -94,6 +94,37 @@ pakon_result pakon_setup_configure(pakon_seq *seq, pakon_setup_state *state,
  */
 pakon_result pakon_setup_teardown(pakon_seq *seq, const pakon_setup_state *state);
 
+/* ---- Event service (OEM Thread_PpbInterrupt, docs/PROTOCOL.md) -----------
+ *
+ * Poll the host `03 01 10`; if its flags carry PAKON_HOST_FLAG_EVENT, read
+ * each controller's event status (LOW, then SCN) and, for each one pending,
+ * send the follow-up built by pakon_event_followup. pakon_cmd_service_events
+ * runs the whole loop over USB.
+ */
+#define PAKON_HOST_FLAG_EVENT     0x80u
+#define PAKON_HOST_FLAG_OVERFLOW  0x02u   /* image FIFO overflow */
+
+/* `01 03 <a> 01 02`: read the 1-byte event status. */
+void pakon_event_read_frame(pakon_packet *pkt, uint8_t addr);
+
+/* Reply `01 03 <a> <flags> <status>` to that read: returns 1 and sets
+ * `*status` if an event is pending (flags bit 0x80), else 0. */
+int pakon_event_parse(const pakon_packet *reply, uint8_t addr, uint8_t *status);
+
+/*
+ * Follow-up for a pending event: the ack `02 05 <a> 02 06 00 <status>` and
+ * its busy poll; for LOW, then the sensor/DX block `01 03 LOW 1e 90` and,
+ * if status & 0x5B (lamp), the temperatures `0x84` and `0x88`.
+ *
+ * From the 95 acks in our seven captures (all from LOW): 0x90 followed 93
+ * of them, whatever the status, so it is read every time rather than only on
+ * status & 0xA4 as TLB.dll's rule reads; 0x84/0x88 followed every 0x02 and
+ * 0x40 ack. The lamp-flags read 0x83 (2 of 95) depends on reply data we do
+ * not have, and is left out. test_setup reproduces 91 of the 95 exactly.
+ */
+pakon_result pakon_event_followup(pakon_seq *seq, uint8_t addr, uint8_t status,
+                                  int is_low);
+
 #ifdef __cplusplus
 }
 #endif

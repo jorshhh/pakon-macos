@@ -215,3 +215,35 @@ pakon_result pakon_setup_teardown(pakon_seq *seq, const pakon_setup_state *state
 
     return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
 }
+
+void pakon_event_read_frame(pakon_packet *pkt, uint8_t addr)
+{
+    const uint8_t d[3] = { addr, 0x01, 0x02 };
+    pakon_packet_build(pkt, PH_READ, d, sizeof d);
+}
+
+int pakon_event_parse(const pakon_packet *reply, uint8_t addr, uint8_t *status)
+{
+    if (reply->type != PH_READ || reply->count < 3 || reply->data[0] != addr)
+        return 0;
+    if (!(reply->data[1] & 0x80))
+        return 0;
+    *status = reply->data[2];
+    return 1;
+}
+
+pakon_result pakon_event_followup(pakon_seq *seq, uint8_t addr, uint8_t status,
+                                  int is_low)
+{
+    if (!seq)
+        return PAKON_ERR_PARAM;
+    write_reg(seq, addr, 0x06, (const uint8_t[]){ 0x00, status }, 2);
+    if (is_low) {
+        read_reg(seq, addr, 0x1E, 0x90);
+        if (status & 0x5B) {
+            read_reg(seq, addr, 0x02, 0x84);
+            read_reg(seq, addr, 0x04, 0x88);
+        }
+    }
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}

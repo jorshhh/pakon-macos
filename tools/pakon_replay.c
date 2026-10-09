@@ -833,26 +833,25 @@ static pakon_result sm_cmd(pakon_dev *dev, const uint8_t *raw, size_t n,
  * preview/calibration phase (all 21 re-arms at <= the motor-start read index);
  * once the motor runs the CCD streams continuously with ZERO re-arms until the
  * film ends. So here we NEVER send a state-changing command -- we only read
- * 0x86 and issue read-only HOST status polls. (The earlier re-arm-on-empty
- * design wedged the bus by writing into a live stream.)
+ * 0x86 and run the event service (host poll; read + ack controller events).
+ * (The earlier re-arm-on-empty design wedged the bus by writing into a live
+ * stream.)
  *
- * HOST status: 0x00 = ready, 0x80 = busy (buffer momentarily starved). The
- * blocking bulk read absorbs busy (device NAKs, libusb waits), so a real read
- * timeout means no data. On timeout we poll HOST: busy => keep waiting; ready
- * => nothing left. Primary stop is end-of-roll white. */
+ * HOST flags: 0x80 = event pending (serviced here, then keep reading),
+ * 0x02 = FIFO overflow. A real read timeout means no data; on timeout with no
+ * event pending we count an idle window. Primary stop is end-of-roll white. */
 static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_bytes,
                          unsigned long *nimg, unsigned long *ncmd, unsigned long *errs,
                          unsigned timeout, unsigned long max_mb, int *film_seen_out)
 {
-    const uint8_t poll_host[] = {0x03,0x01,0x10};
+    unsigned events = 0, overflows = 0;
 
     uint8_t buf[20480];
     int film_seen = 0;
     unsigned trail_white = 0, idle = 0;
     unsigned long long max_bytes = (unsigned long long)max_mb * 1024u * 1024u;
-    pakon_packet reply;
 
-    printf("  [sm] driven image phase: poll HOST + read 0x86 (no re-arm); stop on "
+    printf("  [sm] driven image phase: read 0x86 + event service (no re-arm); stop on "
            "%u trailing open-gate chunks, %u empty windows after film, or %lu MB cap\n",
            SM_TRAIL_WHITE, SM_MAX_EMPTY, max_mb);
 
@@ -865,6 +864,16 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             *img_bytes += got;
             (*nimg)++;
             idle = 0;
+            /* Event service after every read (the OEM polls every 1 ms while
+             * scanning); unacknowledged events are the suspected cause of
+             * the stream dying part-way. --scan-sm is F-135 only. */
+            uint8_t hf = 0;
+            if (pakon_cmd_service_events(dev, AD_PICL, AD_PICM, timeout, &hf,
+                                         &events) != PAKON_OK)
+                (*errs)++;
+            if (hf & PAKON_HOST_FLAG_OVERFLOW)
+                overflows++;
+            (*ncmd)++;
             if (sm_chunk_is_white(buf, got)) {     /* open-gate bright = no film */
                 if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
                     printf("  [sm] end-of-roll: %u open-gate chunks after film "
@@ -894,11 +903,11 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
          * the bus (the old re-arm-on-empty bug). The SM_LOAD_WAIT / SM_MAX_EMPTY
          * bounds cap the spin; teardown (Phase 3) is what actually stops it. */
         uint8_t st = 0xff;
-        if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
-            st = pakon_packet_status(&reply);
-        else (*errs)++;
+        if (pakon_cmd_service_events(dev, AD_PICL, AD_PICM, timeout, &st,
+                                     &events) != PAKON_OK)
+            (*errs)++;
         (*ncmd)++;
-        if (st == 0x80) continue;   /* device busy -> data still coming, wait */
+        if (st & PAKON_HOST_FLAG_EVENT) continue;   /* serviced; keep reading */
 
         idle++;
         if (!film_seen) {                 /* operator still feeding the film */
@@ -921,6 +930,8 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             break;
         }
     }
+    printf("  [sm] event service: %u events acknowledged, %u FIFO-overflow flags\n",
+           events, overflows);
     if (film_seen_out) *film_seen_out = film_seen;
 }
 
@@ -1360,7 +1371,8 @@ static int do_read_params(unsigned timeout, const char *outpath)
  * again), then sends pakon_setup_init + pakon_setup_configure with the OEM
  * reply rules. Stops before the first acquire: LEDs off, motor released.
  * Only the modes the captures verified: F-135 Base 16 + IR, F-135+ Base 16.
- * With --teardown, then sends pakon_setup_teardown.
+ * With --teardown, then sends pakon_setup_teardown. Ends with two event-
+ * service passes (the second should find nothing pending).
  */
 static int load_eeprom_archive(const char *dir, pakon_eeprom *e)
 {
@@ -1466,6 +1478,14 @@ static int do_setup(unsigned timeout, const char *eeprom_dir, int teardown)
         printf("teardown: sending %zu frames...\n", seq.n);
         r = pakon_cmd_run_seq(dev, &seq, timeout < 2000 ? 2000 : timeout);
         printf("teardown: %s\n", r == PAKON_OK ? "OK" : pakon_result_str(r));
+    }
+    for (int pass = 1; r == PAKON_OK && pass <= 2; pass++) {
+        uint8_t flags = 0;
+        unsigned serviced = 0;
+        r = pakon_cmd_service_events(dev, low, scn, timeout < 2000 ? 2000 : timeout,
+                                     &flags, &serviced);
+        printf("events (pass %d): host flags 0x%02x, %u acknowledged%s\n", pass,
+               flags, serviced, r == PAKON_OK ? "" : pakon_result_str(r));
     }
     rc = r == PAKON_OK ? 0 : 1;
 out:

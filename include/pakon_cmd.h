@@ -74,6 +74,17 @@ pakon_pic_state pakon_probe_pic(pakon_dev *dev, uint8_t pic_address,
 pakon_result pakon_cmd_run_seq(pakon_dev *dev, const pakon_seq *seq,
                                unsigned timeout_ms);
 
+/*
+ * One pass of the event service: poll the host `03 01 10`; if an event is
+ * pending, read LOW then SCN event status and send pakon_event_followup for
+ * each pending one. `*host_flags` gets the host flags (0x02 = FIFO overflow);
+ * `*serviced` is incremented per controller event acknowledged. Either may
+ * be NULL. Call every image read while scanning (the OEM polls every 1 ms).
+ */
+pakon_result pakon_cmd_service_events(pakon_dev *dev, uint8_t low, uint8_t scn,
+                                      unsigned timeout_ms, uint8_t *host_flags,
+                                      unsigned *serviced);
+
 #ifdef __cplusplus
 }
 #endif

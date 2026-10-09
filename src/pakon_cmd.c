@@ -188,3 +188,48 @@ pakon_result pakon_cmd_run_seq(pakon_dev *dev, const pakon_seq *seq,
     }
     return PAKON_OK;
 }
+
+pakon_result pakon_cmd_service_events(pakon_dev *dev, uint8_t low, uint8_t scn,
+                                      unsigned timeout_ms, uint8_t *host_flags,
+                                      unsigned *serviced)
+{
+    const uint8_t poll[1] = { AD_HOST };
+    pakon_packet pkt, reply;
+    pakon_result r;
+
+    if (!dev)
+        return PAKON_ERR_PARAM;
+    if ((r = pakon_packet_build(&pkt, PH_READ_STATUS, poll, 1)) != PAKON_OK ||
+        (r = pakon_cmd(dev, &pkt, &reply, timeout_ms)) != PAKON_OK)
+        return r;
+    if (reply.type != PH_READ_STATUS || reply.count < 2 ||
+        pakon_packet_addr(&reply) != AD_HOST)
+        return PAKON_ERR_PROTO;
+    uint8_t flags = reply.data[1];
+    if (host_flags)
+        *host_flags = flags;
+    if (flags & PAKON_HOST_FLAG_OVERFLOW)
+        pakon_logf(PAKON_LOG_WARN, "event service: host reports FIFO overflow");
+    if (!(flags & PAKON_HOST_FLAG_EVENT))
+        return PAKON_OK;
+
+    const uint8_t addrs[2] = { low, scn };   /* LOW first, as the OEM does */
+    for (int i = 0; i < 2; i++) {
+        uint8_t status = 0;
+        pakon_event_read_frame(&pkt, addrs[i]);
+        if ((r = pakon_cmd(dev, &pkt, &reply, timeout_ms)) != PAKON_OK)
+            return r;
+        if (!pakon_event_parse(&reply, addrs[i], &status))
+            continue;
+        pakon_seq seq;
+        pakon_seq_init(&seq);
+        pakon_event_followup(&seq, addrs[i], status, addrs[i] == low);
+        if ((r = pakon_cmd_run_seq(dev, &seq, timeout_ms)) != PAKON_OK)
+            return r;
+        pakon_logf(PAKON_LOG_INFO, "event service: 0x%02x status 0x%02x acknowledged",
+                   addrs[i], status);
+        if (serviced)
+            (*serviced)++;
+    }
+    return PAKON_OK;
+}
