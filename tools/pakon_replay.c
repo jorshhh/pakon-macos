@@ -14,6 +14,8 @@
 #include "pakon_cmd.h"
 #include "pakon_calib.h"
 #include "pakon_log.h"
+#include "pakon_eeprom.h"
+#include "pakon_setup.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -831,26 +833,25 @@ static pakon_result sm_cmd(pakon_dev *dev, const uint8_t *raw, size_t n,
  * preview/calibration phase (all 21 re-arms at <= the motor-start read index);
  * once the motor runs the CCD streams continuously with ZERO re-arms until the
  * film ends. So here we NEVER send a state-changing command -- we only read
- * 0x86 and issue read-only HOST status polls. (The earlier re-arm-on-empty
- * design wedged the bus by writing into a live stream.)
+ * 0x86 and run the event service (host poll; read + ack controller events).
+ * (The earlier re-arm-on-empty design wedged the bus by writing into a live
+ * stream.)
  *
- * HOST status: 0x00 = ready, 0x80 = busy (buffer momentarily starved). The
- * blocking bulk read absorbs busy (device NAKs, libusb waits), so a real read
- * timeout means no data. On timeout we poll HOST: busy => keep waiting; ready
- * => nothing left. Primary stop is end-of-roll white. */
+ * HOST flags: 0x80 = event pending (serviced here, then keep reading),
+ * 0x02 = FIFO overflow. A real read timeout means no data; on timeout with no
+ * event pending we count an idle window. Primary stop is end-of-roll white. */
 static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_bytes,
                          unsigned long *nimg, unsigned long *ncmd, unsigned long *errs,
                          unsigned timeout, unsigned long max_mb, int *film_seen_out)
 {
-    const uint8_t poll_host[] = {0x03,0x01,0x10};
+    unsigned events = 0, overflows = 0;
 
     uint8_t buf[20480];
     int film_seen = 0;
     unsigned trail_white = 0, idle = 0;
     unsigned long long max_bytes = (unsigned long long)max_mb * 1024u * 1024u;
-    pakon_packet reply;
 
-    printf("  [sm] driven image phase: poll HOST + read 0x86 (no re-arm); stop on "
+    printf("  [sm] driven image phase: read 0x86 + event service (no re-arm); stop on "
            "%u trailing open-gate chunks, %u empty windows after film, or %lu MB cap\n",
            SM_TRAIL_WHITE, SM_MAX_EMPTY, max_mb);
 
@@ -863,6 +864,16 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             *img_bytes += got;
             (*nimg)++;
             idle = 0;
+            /* Event service after every read (the OEM polls every 1 ms while
+             * scanning); unacknowledged events are the suspected cause of
+             * the stream dying part-way. --scan-sm is F-135 only. */
+            uint8_t hf = 0;
+            if (pakon_cmd_service_events(dev, AD_PICL, AD_PICM, timeout, &hf,
+                                         &events) != PAKON_OK)
+                (*errs)++;
+            if (hf & PAKON_HOST_FLAG_OVERFLOW)
+                overflows++;
+            (*ncmd)++;
             if (sm_chunk_is_white(buf, got)) {     /* open-gate bright = no film */
                 if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
                     printf("  [sm] end-of-roll: %u open-gate chunks after film "
@@ -892,11 +903,11 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
          * the bus (the old re-arm-on-empty bug). The SM_LOAD_WAIT / SM_MAX_EMPTY
          * bounds cap the spin; teardown (Phase 3) is what actually stops it. */
         uint8_t st = 0xff;
-        if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
-            st = pakon_packet_status(&reply);
-        else (*errs)++;
+        if (pakon_cmd_service_events(dev, AD_PICL, AD_PICM, timeout, &st,
+                                     &events) != PAKON_OK)
+            (*errs)++;
         (*ncmd)++;
-        if (st == 0x80) continue;   /* device busy -> data still coming, wait */
+        if (st & PAKON_HOST_FLAG_EVENT) continue;   /* serviced; keep reading */
 
         idle++;
         if (!film_seen) {                 /* operator still feeding the film */
@@ -919,6 +930,8 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             break;
         }
     }
+    printf("  [sm] event service: %u events acknowledged, %u FIFO-overflow flags\n",
+           events, overflows);
     if (film_seen_out) *film_seen_out = film_seen;
 }
 
@@ -1351,6 +1364,137 @@ static int do_read_params(unsigned timeout, const char *outpath)
  * Open + (optional) init prelude + write the calibration register set from C
  * defaults (the OEM's validated converged values), instead of replaying frozen
  * captured writes. Proves we can program the calibration independently. */
+/* ---- Controller init + mode configure built in code (no replay) ----------
+ *
+ * Detects the model with the PIC probes, takes the unit's Base 16 Offset from
+ * an EEPROM archive (tools/pakon_eeprom.py backup; the chip is not read
+ * again), then sends pakon_setup_init + pakon_setup_configure with the OEM
+ * reply rules. Stops before the first acquire: LEDs off, motor released.
+ * Only the modes the captures verified: F-135 Base 16 + IR, F-135+ Base 16.
+ * With --teardown, then sends pakon_setup_teardown. Ends with two event-
+ * service passes (the second should find nothing pending).
+ */
+static int load_eeprom_archive(const char *dir, pakon_eeprom *e)
+{
+    static const char *names[PAKON_EEPROM_NCOPIES] = {
+        "sectionA_primary", "sectionA_backup", "sectionB_primary", "sectionB_backup"
+    };
+    static uint8_t buf[PAKON_EEPROM_NCOPIES][PAKON_EEPROM_A_LEN + 1];
+    const uint8_t *data[PAKON_EEPROM_NCOPIES];
+    size_t len[PAKON_EEPROM_NCOPIES];
+    for (int i = 0; i < PAKON_EEPROM_NCOPIES; i++) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/eeprom_0x52_%s.bin", dir, names[i]);
+        FILE *f = fopen(path, "rb");
+        data[i] = NULL;
+        len[i] = 0;
+        if (!f)
+            continue;
+        len[i] = fread(buf[i], 1, sizeof buf[i], f);
+        data[i] = buf[i];
+        fclose(f);
+    }
+    return pakon_eeprom_decode(data, len, e) == PAKON_OK;
+}
+
+static int do_setup(unsigned timeout, const char *eeprom_dir, int teardown)
+{
+    pakon_eeprom e;
+    if (!eeprom_dir || !load_eeprom_archive(eeprom_dir, &e)) {
+        fprintf(stderr, "setup: need --eeprom-dir with a decodable EEPROM "
+                "archive (python3 tools/pakon_eeprom.py backup DIR)\n");
+        return 1;
+    }
+    printf("eeprom: %s serial %u, Base 16 Offset %u\n",
+           pakon_eeprom_model(e.scanner_type), e.serial,
+           e.base[PAKON_EEPROM_BASE16].offset);
+
+    pakon_ctx *ctx = NULL;
+    pakon_dev *dev = NULL;
+    if (pakon_usb_init(&ctx) != PAKON_OK)
+        return 1;
+    if (pakon_usb_open(ctx, &dev) != PAKON_OK) {
+        fprintf(stderr, "open device failed (need warm 0F05:F135)\n");
+        pakon_usb_exit(ctx);
+        return 1;
+    }
+    if (pakon_usb_claim(dev, 0, 0) != PAKON_OK) {
+        fprintf(stderr, "claim failed\n");
+        pakon_usb_close(dev);
+        pakon_usb_exit(ctx);
+        return 1;
+    }
+
+    int rc = 1;
+    pakon_bridge_open(dev, timeout);
+    pakon_pic_state plus = pakon_probe_pic(dev, AD_PICM_PLUS, NULL, timeout);
+    pakon_pic_state base = pakon_probe_pic(dev, AD_PICM, NULL, timeout);
+    uint8_t low, scn;
+    uint16_t led_period;
+    pakon_scan_mode m = { 0 };
+    if (plus == PAKON_PIC_PRESENT && base == PAKON_PIC_ABSENT) {
+        low = AD_PICL_PLUS;
+        scn = AD_PICM_PLUS;
+        led_period = PAKON_SETUP_LED_PERIOD_F135_PLUS;
+        m.trigger = 0x003C;                 /* Base 16 */
+        m.integration = 0x0FFD;
+        printf("model: F-135+ -> Base 16\n");
+    } else if (base == PAKON_PIC_PRESENT && plus == PAKON_PIC_ABSENT) {
+        low = AD_PICL;
+        scn = AD_PICM;
+        led_period = PAKON_SETUP_LED_PERIOD_F135;
+        m.trigger = 0x0010;                 /* Base 16 + IR */
+        m.ir = 1;
+        m.integration = 0x0C1A;
+        printf("model: F-135 -> Base 16 + IR\n");
+    } else {
+        fprintf(stderr, "setup: model detection failed (plus=%d base=%d)\n",
+                plus, base);
+        goto out;
+    }
+    if ((low == AD_PICL) != (e.scanner_type == PAKON_EEPROM_TYPE_F135)) {
+        fprintf(stderr, "setup: EEPROM archive is for a %s, scanner is not\n",
+                pakon_eeprom_model(e.scanner_type));
+        goto out;
+    }
+    pakon_setup_pixel_window(e.base[PAKON_EEPROM_BASE16].offset, 0,
+                             &m.pixel_start, &m.pixel_end);
+
+    pakon_seq seq;
+    pakon_setup_state st;
+    pakon_seq_init(&seq);
+    if (pakon_setup_init(&seq, low, scn, led_period, &st) != PAKON_OK ||
+        pakon_setup_configure(&seq, &st, &m) != PAKON_OK) {
+        fprintf(stderr, "setup: could not build the sequence\n");
+        goto out;
+    }
+    printf("sending %zu frames...\n", seq.n);
+    pakon_result r = pakon_cmd_run_seq(dev, &seq, timeout < 2000 ? 2000 : timeout);
+    printf("setup: %s\n", r == PAKON_OK ? "OK, configured (not acquiring)"
+                                        : pakon_result_str(r));
+    if (r == PAKON_OK && teardown) {
+        pakon_seq_init(&seq);
+        pakon_setup_teardown(&seq, &st);
+        printf("teardown: sending %zu frames...\n", seq.n);
+        r = pakon_cmd_run_seq(dev, &seq, timeout < 2000 ? 2000 : timeout);
+        printf("teardown: %s\n", r == PAKON_OK ? "OK" : pakon_result_str(r));
+    }
+    for (int pass = 1; r == PAKON_OK && pass <= 2; pass++) {
+        uint8_t flags = 0;
+        unsigned serviced = 0;
+        r = pakon_cmd_service_events(dev, low, scn, timeout < 2000 ? 2000 : timeout,
+                                     &flags, &serviced);
+        printf("events (pass %d): host flags 0x%02x, %u acknowledged%s\n", pass,
+               flags, serviced, r == PAKON_OK ? "" : pakon_result_str(r));
+    }
+    rc = r == PAKON_OK ? 0 : 1;
+out:
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+    return rc;
+}
+
 static int do_configure(unsigned timeout, const char *prelude)
 {
     pakon_ctx *ctx = NULL;
@@ -1406,6 +1550,7 @@ static void usage(const char *argv0)
         "       %s --calibrate [--cal-lines N] [--cal-verbose]  driven calibration\n"
         "       %s --read-params [--params-out FILE]      dump cached calibration table\n"
         "       %s --configure [--prelude FILE]           program calibration regs from C\n"
+        "       %s --setup --eeprom-dir DIR [--teardown]  controller init + Base 16 configure, built in code\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
@@ -1437,7 +1582,7 @@ static void usage(const char *argv0)
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -1446,6 +1591,8 @@ int main(int argc, char **argv)
     int want_advance_run = 0;       /* --advance: standalone or after --scan */
     unsigned advance_seconds = 15;
     int want_calibrate = 0, cal_verbose = 0, want_read_params = 0, want_configure = 0;
+    int want_setup = 0, want_teardown = 0;
+    const char *eeprom_dir = NULL;
     unsigned long cal_lines = 32;
     unsigned long cal_exposure = 256;
     const char *cal_prelude = NULL;
@@ -1469,6 +1616,12 @@ int main(int argc, char **argv)
             want_calibrate = 1;
         } else if (!strcmp(argv[i], "--read-params")) {
             want_read_params = 1;
+        } else if (!strcmp(argv[i], "--setup")) {
+            want_setup = 1;
+        } else if (!strcmp(argv[i], "--teardown")) {
+            want_teardown = 1;
+        } else if (!strcmp(argv[i], "--eeprom-dir") && i + 1 < argc) {
+            eeprom_dir = argv[++i];
         } else if (!strcmp(argv[i], "--configure")) {
             want_configure = 1;
         } else if (!strcmp(argv[i], "--params-out") && i + 1 < argc) {
@@ -1515,6 +1668,7 @@ int main(int argc, char **argv)
     }
 
     if (!want_open && !want_calibrate && !want_read_params && !want_configure &&
+        !want_setup &&
         !scan_file && !scan_sm_file && !advance_file && !want_advance_run) {
         usage(argv[0]);
         return 2;
@@ -1522,6 +1676,8 @@ int main(int argc, char **argv)
 
     if (want_read_params)
         return do_read_params(timeout < 2000 ? 2000 : timeout, params_out);
+    if (want_setup)
+        return do_setup(timeout, eeprom_dir, want_teardown);
     if (want_configure)
         return do_configure(timeout, cal_prelude);
     if (want_calibrate)

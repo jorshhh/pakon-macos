@@ -12,6 +12,7 @@
 
 #include "pakon_usb.h"
 #include "pakon_proto.h"
+#include "pakon_setup.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,6 +59,31 @@ typedef enum {
 
 pakon_pic_state pakon_probe_pic(pakon_dev *dev, uint8_t pic_address,
                                 uint8_t *status_out, unsigned timeout_ms);
+
+/*
+ * Send a generated sequence (pakon_setup) with the OEM reply rules
+ * (PPB_CheckReply, docs/PROTOCOL.md):
+ *   - WRITE/COMMAND: reply `07 02 <a> <status>`; 0/8 OK, 3/6/9 retried (3
+ *     tries), anything else PAKON_ERR_STATUS.
+ *   - STATUS poll `03 01 <a>`: repeated until flags bit 0 (busy) clears, up to
+ *     44 tries with a growing delay; else PAKON_ERR_TIMEOUT.
+ *   - READ/STATUS replies must echo the type and address; flags 0x20, or 0x04
+ *     from a controller, are PAKON_ERR_STATUS.
+ * Refuses type 0 frames and bootloader addresses before sending anything.
+ */
+pakon_result pakon_cmd_run_seq(pakon_dev *dev, const pakon_seq *seq,
+                               unsigned timeout_ms);
+
+/*
+ * One pass of the event service: poll the host `03 01 10`; if an event is
+ * pending, read LOW then SCN event status and send pakon_event_followup for
+ * each pending one. `*host_flags` gets the host flags (0x02 = FIFO overflow);
+ * `*serviced` is incremented per controller event acknowledged. Either may
+ * be NULL. Call every image read while scanning (the OEM polls every 1 ms).
+ */
+pakon_result pakon_cmd_service_events(pakon_dev *dev, uint8_t low, uint8_t scn,
+                                      unsigned timeout_ms, uint8_t *host_flags,
+                                      unsigned *serviced);
 
 #ifdef __cplusplus
 }
