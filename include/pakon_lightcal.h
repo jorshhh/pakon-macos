@@ -72,7 +72,10 @@ int pakon_lc_stats_range(const uint16_t *s, size_t nsamples, size_t line_px,
  * the open-gate duty * 10^D. */
 extern const double pakon_lc_density_c41[PAKON_LC_NCH];
 
-/* Next A/D offset from a black-pixel mean: off + round((mean - 300) * -0.0133929). */
+/* Next A/D offset from a black-pixel mean: off + round((mean - 300) * -0.0133929)
+ * (TLB.dll). When that rounds to no change while the mean is still outside
+ * 300 +/- 32 (e.g. 334: step -0.46), step one code toward the target instead;
+ * one code moves the level ~54 counts. */
 int pakon_lc_offset_next(int offset, double black_mean);
 int pakon_lc_dark_ok(double black_mean);       /* within 300 +/- 32 */
 
