@@ -260,6 +260,26 @@ static void tally_events(const char *path, size_t *acks, size_t *matched)
     }
 }
 
+/* Serialize the non-poll frames of `seq` as hex, space-separated. */
+static void seq_hex(const pakon_seq *seq, char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = 0;
+    for (size_t i = 0; i < seq->n; i++) {
+        if (seq->pkt[i].type == PH_READ_STATUS)
+            continue;
+        uint8_t wire[PAKON_PACKET_SIZE];
+        size_t wl = 0;
+        pakon_packet_serialize(&seq->pkt[i], wire, sizeof wire, &wl);
+        for (size_t k = 0; k < wl && o + 3 < cap; k++)
+            o += (size_t)snprintf(out + o, cap - o, "%02x", wire[k]);
+        if (o + 2 < cap)
+            out[o++] = ' ', out[o] = 0;
+    }
+    if (o && out[o - 1] == ' ')
+        out[o - 1] = 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -339,6 +359,90 @@ int main(int argc, char **argv)
         snprintf(msg, sizeof msg, "event follow-ups: %zu of %zu captured acks "
                  "reproduced (expect 91 of 95)", matched, acks);
         CHECK(acks == 95 && matched == 91, msg);
+    }
+
+    /* Calibration writes, against frames from scan.pakscan's calibration. */
+    {
+        pakon_seq seq;
+        pakon_setup_state st;
+        char hx[1024];
+        pakon_seq_init(&seq);
+        pakon_setup_init(&seq, AD_PICL, AD_PICM, PAKON_SETUP_LED_PERIOD_F135, &st);
+        st.reg0 = 0x0160;   /* after Base 16 + IR configure */
+
+        pakon_seq_init(&seq);
+        pakon_setup_acquire(&seq, &st, 1);
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "0206240382006101"), "acquire on = reg 0 0x0161");
+
+        pakon_seq_init(&seq);
+        pakon_setup_afe(&seq, &st, (const int[]){ 13, 13, 13 },
+                        (const int[]){ -51, -42, -43 });
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "0206240384020d00 0206240384030d00 0206240384040d00 "
+                          "0206240384053301 0206240384062a01 0206240384072b01"),
+              "AFE gains 13 and offsets -51/-42/-43 as captured");
+
+        pakon_seq_init(&seq);
+        pakon_led_values cur = { .r = 2, .g = 3, .b = 3, .ir = 2 };
+        CHECK(pakon_setup_leds(&seq, &st, 0x03, &cur,
+                               (const uint16_t[]){ 0x380, 0x2C4, 0x116, 0x549 },
+                               0x742) == PAKON_OK, "LED write accepted");
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "020420018003 02082005810302020003 "
+                          "020f200c821601490580030000c4024207"),
+              "LED enable, currents and converged duties as captured");
+
+        pakon_seq_init(&seq);
+        cur.r = 9;
+        CHECK(pakon_setup_leds(&seq, &st, 0x03, &cur,
+                               (const uint16_t[]){ 1, 1, 1, 1 }, 0x742)
+                  == PAKON_ERR_PARAM && seq.n == 0,
+              "current above the F-135 ceiling refused");
+        cur.r = 2;
+        CHECK(pakon_setup_leds(&seq, &st, 0x03, &cur,
+                               (const uint16_t[]){ 0x741, 1, 1, 1 }, 0x742)
+                  == PAKON_ERR_PARAM && seq.n == 0, "duty above period - 2 refused");
+        st.reg0 = 0x0060;   /* IR off: IR ceiling 0 */
+        cur = (pakon_led_values){ .r = 1, .g = 1, .b = 1, .ir = 1 };
+        CHECK(pakon_setup_leds(&seq, &st, 0x01, &cur,
+                               (const uint16_t[]){ 1, 1, 1, 1 }, 0x742)
+                  == PAKON_ERR_PARAM, "IR current with IR off refused");
+    }
+
+    /* Scan start, against scan.pakscan lines 1688-1724 (status-LED words
+     * and image reads aside). Scan duties B 0x5A2 IR 0x548 R 0x4DF G 0x6EF;
+     * speed 0x0615 = serial 3054's Base 16 MotorSpeed_Ir 1557 x 1000/1000. */
+    {
+        pakon_seq seq;
+        pakon_setup_state st;
+        char hx[2048];
+        pakon_seq_init(&seq);
+        pakon_setup_init(&seq, AD_PICL, AD_PICM, PAKON_SETUP_LED_PERIOD_F135, &st);
+        st.reg0 = 0x0160;
+        CHECK(pakon_setup_motor_speed(1557, 1000, 0) == 0x0615,
+              "motor speed 1557 x 1000 / 1000 = 0x0615");
+        CHECK(pakon_setup_motor_speed(1557, 1200, 0) == 1712 &&
+              pakon_setup_motor_speed(100, 1000, 0) == 400 &&
+              pakon_setup_motor_speed(25726, 1000, 1) == 25726,
+              "motor speed: adjust and range clamps");
+        pakon_seq_init(&seq);
+        CHECK(pakon_setup_scan_start(&seq, &st, 43,
+                                     (const uint16_t[]){ 0x4DF, 0x6EF, 0x5A2, 0x548 },
+                                     0x742, 0x0615, 0x0010) == PAKON_OK,
+              "scan start built");
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "0206240382006001 020410018402 040320008a "
+                          "0206240382042b00 020420018003 "
+                          "020f200c82a2054805df040000ef064207 "
+                          "02052402a51506 04032400a0 0206240382006101 "
+                          "0206200391100001"),
+              "scan start matches the capture");
+        pakon_seq_init(&seq);
+        CHECK(pakon_setup_scan_start(&seq, &st, 43,
+                                     (const uint16_t[]){ 1, 1, 1, 1 }, 0x742,
+                                     9501, 0x0010) == PAKON_ERR_PARAM && seq.n == 0,
+              "motor speed above the F-135 range refused");
     }
 
     /* Integration above the FPGA limit is refused. */

@@ -114,6 +114,23 @@ both sections and check the CRCs (layout: pakon-reference `calibration.md`).
 Our unit: type 1350 (base F-135), serial 3054. `tools/pakon_eeprom.py` reads and
 archives all four copies and decodes them; see `docs/EEPROM_BACKUP.md`.
 
+## Calibration reads (motor stopped) [C]
+
+Measured on serial 3054, 2026-10-09 (`pakon_replay --calib-probe`,
+`--light-cal`):
+
+- With acquire on (bank `0x82` reg 0 bit 0) and the motor stopped, `0x86`
+  streams lines continuously. After changing the light or the A/D settings,
+  re-arm with ResetFifos and read.
+- A line is `4 × (reg5 − reg4)` u16 samples (8148 with the calibration window
+  6..2043): the RGB block (pixels interleaved R, G, B), then the IR block.
+- No sample carries the scan-time marker bit, and where a read starts within a
+  line varies between reads. Align each read on the optically black pixels:
+  the first ~22 pixels of each block are black, then the level ramps up to the
+  open-gate level by pixel ~37.
+- After an A/D offset write, wait ~300 ms before measuring the dark level;
+  without it the reading varied by about ±50 counts (one offset code ≈ 54).
+
 ## Event service (the "housekeeping") [C]
 
 The OEM runs a dedicated thread (`Thread_PpbInterrupt`) for the whole session:
@@ -164,7 +181,8 @@ tests; writing bank `0x82` reg 0 back to its idle value stopped it. That write
 was described at the time as a "motor speed register 0"; it is the FPGA
 control register, and the value clears the **acquire** bit (`0x61` → `0x60`).
 The OEM does the same in step 9, before `a2`. So: clear the acquire bit, then
-`a2` [C for the order in captures and `TLB.dll`; the causal link is I].
+`a2` [C: captures, `TLB.dll`, and on serial 3054 the code-built teardown
+stopped the running motor at the end of a `--scan-code` scan, 2026-10-09].
 
 ## End of film [C]
 
@@ -195,6 +213,9 @@ The OEM moves film with the motor commands above: set speed (`0xA5`), start
 | `--scan FILE` | verbatim replay of a capture; fits a roll the capture's length |
 | `--scan FILE --autostop` | verbatim replay, stops at end-of-roll white, then replays the teardown |
 | `--scan-sm FILE` | replays setup to motor start, then reads with the event service; scans a whole strip (F-135) |
+| `--setup --eeprom-dir DIR [--teardown]` | code-built setup (and teardown), Base 16 |
+| `--calib-probe` / `--light-cal --eeprom-dir DIR` | static line levels / light calibration in code (F-135, open gate) |
+| `--scan-code --eeprom-dir DIR [--image OUT]` | scan with nothing replayed (F-135, Base 16 + IR); feed the film once the motor runs |
 | `advance.pakscan --steps N` | replayed advance loop; motor address probed per model (`resources/f135plus/advance.pakscan` for the Plus) |
 | `--advance [--advance-seconds N]` | timed transport run to push a strip out, standalone or after `--scan`; model-specific captured speed |
 | Ctrl-C during `--scan`/`--advance` | first press stops and replays the teardown / stop writes; the run reports failure |
