@@ -13,6 +13,7 @@ Endpoints
 GET  /api/status                  scanner state + current job info
 POST /api/firmware                SSE — load firmware (cold device)
 POST /api/scan                    SSE — run a scan
+POST /api/eject                   SSE — run the film out of the transport
 POST /api/process                 SSE — decode .raw (upload or last scan)
 GET  /api/frames                  list decoded frames
 GET  /api/frames/{n}/thumb        JPEG thumbnail
@@ -43,6 +44,15 @@ _RES = Path(os.environ.get("PAKON_RESOURCES", str(_REPO / "resources")))
 PROBE_BIN  = _BUILD / "pakon_probe"
 REPLAY_BIN = _BUILD / "pakon_replay"
 PAKFW      = _RES / "f135.pakfw"      # same FX2 image for F-135 and F-135+
+# Firmware from the OEM Intel HEX files when present (firmware/README.md);
+# otherwise the captured load above is replayed.
+_FW = Path(os.environ.get("PAKON_FIRMWARE", str(_REPO / "firmware")))
+FW_STAGE1  = _FW / "PknLdr.hex"
+FW_MAIN    = _FW / "Pakon7.hex"
+# The unit's EEPROM archive (tools/pakon_eeprom.py backup) is what the
+# replay-free scan reads its per-unit values from. PAKON_EEPROM_DIR picks one;
+# otherwise the newest archive under backups/eeprom/ is used.
+EEPROM_DIR_OVERRIDE = os.environ.get("PAKON_EEPROM_DIR")
 # The scan script is model-specific (the two models' PICs live at different
 # bus addresses); the model is detected at scan time via pakon_replay --open.
 # PAKON_PAKSCAN overrides the choice with an explicit script path.
@@ -62,6 +72,22 @@ _state: dict = {
     "prescan": None,     # prescan() metadata (ribbon path, base, pitch, centres…)
     "processing": False,
 }
+
+
+def _eeprom_dir() -> Path | None:
+    if EEPROM_DIR_OVERRIDE:
+        p = Path(EEPROM_DIR_OVERRIDE).expanduser()
+        return p if p.is_dir() else None
+    root = _REPO / "backups" / "eeprom"
+    if not root.is_dir():
+        return None
+    archives = [d for d in root.iterdir()
+                if (d / "eeprom_0x52_sectionA_primary.bin").exists()]
+    return max(archives, key=lambda d: d.stat().st_mtime) if archives else None
+
+
+def _fw_hex_available() -> bool:
+    return FW_STAGE1.exists() and FW_MAIN.exists()
 
 
 # ── Scanner detection ─────────────────────────────────────────────────────────
@@ -104,19 +130,29 @@ async def api_status():
         "out_dir": str(_state["out_dir"]),
         "frame_count": len(_state["frames"]),
         "processing": _state["processing"],
+        "eeprom": (lambda d: d.name if d else None)(_eeprom_dir()),
+        "firmware_hex": _fw_hex_available(),
     }
 
 
 # ── Firmware load ─────────────────────────────────────────────────────────────
 
 async def _firmware_stream():
-    for path, label in [(PROBE_BIN, "pakon_probe binary"), (PAKFW, "firmware file")]:
+    if _fw_hex_available():
+        args = ["--load-firmware-hex", str(FW_STAGE1), str(FW_MAIN)]
+        source = f"Intel HEX ({FW_STAGE1.name} + {FW_MAIN.name})"
+    else:
+        args = ["--load-firmware", str(PAKFW)]
+        source = f"captured load {PAKFW.name} (no HEX files in {_FW})"
+    for path, label in [(PROBE_BIN, "pakon_probe binary"),
+                        (Path(args[1]), "firmware file")]:
         if not path.exists():
             yield _sse({"type": "error", "message": f"{label} not found: {path}"})
             return
+    yield _sse({"type": "log", "message": f"Loading firmware from {source}"})
 
     proc = await asyncio.create_subprocess_exec(
-        str(PROBE_BIN), "--load-firmware", str(PAKFW),
+        str(PROBE_BIN), *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
@@ -155,19 +191,82 @@ async def _detect_model() -> str | None:
     return None
 
 
+# Lines of `pakon_replay --scan-code` worth showing, and the one that means
+# "the motor runs, feed the film".
+_SCAN_LOG_KEYS = ("calibrated:", "film detected", "end-of-roll", "stream ended",
+                  "no film fed", "safety cap", "event service:", "scan-code:",
+                  "teardown", "failed", "did not converge", "insufficient")
+_FEED_KEY = "feed the film now"
+
+
+async def _run_streaming(args: list[str], out_path: Path | None, keys=None):
+    """Run pakon_replay with `args`, yielding SSE events: selected output lines
+    as 'log', the feed prompt as 'feed', and the image size as 'progress'
+    every 0.5 s when `out_path` is given. Ends with the exit code."""
+    proc = await asyncio.create_subprocess_exec(
+        str(REPLAY_BIN), *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    lines: asyncio.Queue = asyncio.Queue()
+
+    async def _reader():
+        async for raw in proc.stdout:
+            await lines.put(raw.decode(errors="replace").strip())
+
+    reader = asyncio.create_task(_reader())
+    while True:
+        done = False
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=0.5)
+            done = True
+        except asyncio.TimeoutError:
+            pass
+        if done:
+            await reader
+        while not lines.empty():
+            line = lines.get_nowait()
+            if _FEED_KEY in line:
+                yield {"type": "feed",
+                       "message": "Motor running — feed the film now"}
+            elif keys is None or any(k in line for k in keys):
+                if line and "0x81: timeout" not in line:
+                    yield {"type": "log", "message": line}
+        if out_path is not None:
+            size = out_path.stat().st_size if out_path.exists() else 0
+            yield {"type": "progress", "bytes": size,
+                   "mb": round(size / 1_048_576, 1)}
+        if done:
+            break
+    yield {"type": "exit", "code": proc.returncode}
+
+
 async def _scan_stream(out_dir: Path):
     if not REPLAY_BIN.exists():
         yield _sse({"type": "error",
                     "message": f"pakon_replay binary not found: {REPLAY_BIN}"})
         return
 
+    model = None
+    eeprom = _eeprom_dir()
+    if not PAKSCAN_OVERRIDE:
+        yield _sse({"type": "log", "message": "Detecting scanner model..."})
+        model = await _detect_model()
+    if model == "F-135" and eeprom is not None:
+        async for ev in _scan_code_stream(out_dir, eeprom):
+            yield ev
+        return
+    if model == "F-135":
+        yield _sse({"type": "log",
+                    "message": "No EEPROM archive in backups/eeprom/ (or "
+                               "PAKON_EEPROM_DIR): falling back to the "
+                               "replayed scan"})
+
     if PAKSCAN_OVERRIDE:
         pakscan = Path(PAKSCAN_OVERRIDE)
         yield _sse({"type": "log",
                     "message": f"Using PAKON_PAKSCAN override: {pakscan}"})
     else:
-        yield _sse({"type": "log", "message": "Detecting scanner model..."})
-        model = await _detect_model()
         if model is None:
             yield _sse({"type": "error",
                         "message": "could not detect the scanner model (is it "
@@ -183,25 +282,10 @@ async def _scan_stream(out_dir: Path):
                     "message": f"scan script not found: {pakscan}"})
         return
 
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        yield _sse({"type": "error",
-                    "message": f"cannot create output dir {out_dir}: {exc}"})
+    out_path, err = _prepare_out(out_dir)
+    if err:
+        yield _sse({"type": "error", "message": err})
         return
-    if not os.access(out_dir, os.W_OK):
-        yield _sse({"type": "error",
-                    "message": f"output dir not writable: {out_dir}"})
-        return
-
-    out_path = out_dir / "scan.raw"
-    _state["scan_path"] = out_path
-    _state["out_dir"] = out_dir
-    _state["frames"] = []
-
-    # Remove stale output so size polling starts from 0.
-    if out_path.exists():
-        out_path.unlink()
 
     proc = await asyncio.create_subprocess_exec(
         str(REPLAY_BIN), "--scan", str(pakscan), "--image", str(out_path),
@@ -231,6 +315,93 @@ async def _scan_stream(out_dir: Path):
     else:
         yield _sse({"type": "error",
                     "message": f"scan failed (exit {proc.returncode})"})
+
+
+def _prepare_out(out_dir: Path) -> tuple[Path | None, str | None]:
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return None, f"cannot create output dir {out_dir}: {exc}"
+    if not os.access(out_dir, os.W_OK):
+        return None, f"output dir not writable: {out_dir}"
+    out_path = out_dir / "scan.raw"
+    _state["scan_path"] = out_path
+    _state["out_dir"] = out_dir
+    _state["frames"] = []
+    if out_path.exists():
+        out_path.unlink()
+    return out_path, None
+
+
+async def _scan_code_stream(out_dir: Path, eeprom: Path):
+    """F-135 scan with nothing replayed: setup, light calibration (open gate,
+    keep the film out), motor start, then the operator feeds the film."""
+    out_path, err = _prepare_out(out_dir)
+    if err:
+        yield _sse({"type": "error", "message": err})
+        return
+    yield _sse({"type": "log",
+                "message": f"Model: F-135 — scan built in code (EEPROM "
+                           f"{eeprom.name}). Calibrating: keep the film out "
+                           f"until the motor starts."})
+    code = 1
+    async for ev in _run_streaming(
+            ["--scan-code", "--eeprom-dir", str(eeprom), "--image", str(out_path)],
+            out_path, _SCAN_LOG_KEYS):
+        if ev["type"] == "exit":
+            code = ev["code"]
+        else:
+            yield _sse(ev)
+    size = out_path.stat().st_size if out_path.exists() else 0
+    mb = round(size / 1_048_576, 1)
+    if code == 0:
+        yield _sse({"type": "done", "bytes": size, "mb": mb, "path": str(out_path)})
+    else:
+        yield _sse({"type": "error",
+                    "message": f"scan failed (exit {code}) — see the log"})
+
+
+async def _eject_stream():
+    if not REPLAY_BIN.exists():
+        yield _sse({"type": "error",
+                    "message": f"pakon_replay binary not found: {REPLAY_BIN}"})
+        return
+    model = await _detect_model()
+    if model is None:
+        yield _sse({"type": "error",
+                    "message": "could not detect the scanner model (is it warm?)"})
+        return
+    if model == "F-135":
+        eeprom = _eeprom_dir()
+        if eeprom is None:
+            yield _sse({"type": "error",
+                        "message": "eject needs an EEPROM archive in "
+                                   "backups/eeprom/ (or PAKON_EEPROM_DIR)"})
+            return
+        args = ["--eject", "--eeprom-dir", str(eeprom)]
+        yield _sse({"type": "log", "message": "Running the transport until the "
+                    "film sensors say the strip is out (at most 60 s)"})
+    else:
+        args = ["--advance", "--advance-seconds", "15"]
+        yield _sse({"type": "log",
+                    "message": "F-135+: running the transport for 15 s"})
+    code = 1
+    keys = ("motor", "eject:", "advance", "failed", "FAILED")
+    async for ev in _run_streaming(args, None, keys):
+        if ev["type"] == "exit":
+            code = ev["code"]
+        else:
+            yield _sse(ev)
+    if code == 0:
+        yield _sse({"type": "done"})
+    else:
+        yield _sse({"type": "error", "message": f"eject failed (exit {code})"})
+
+
+@app.post("/api/eject")
+async def api_eject():
+    return StreamingResponse(_eject_stream(), media_type="text/event-stream",
+                             headers=_SSE_HEADERS)
 
 
 @app.post("/api/scan")

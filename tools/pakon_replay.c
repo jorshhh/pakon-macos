@@ -2291,6 +2291,10 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
+    /* Line-buffered even into a pipe: the web client reads progress (e.g. the
+     * "feed the film now" prompt) as it happens. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     int want_open = 0, drain = 0, trace_status = 0, autostop = 0;
     int want_advance_run = 0;       /* --advance: standalone or after --scan */
     unsigned advance_seconds = 15;
