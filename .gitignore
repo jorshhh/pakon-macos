@@ -38,3 +38,4 @@ scratch/
 
 # personal EEPROM archives (test fixtures remain tracked)
 /backups/
+.venv/

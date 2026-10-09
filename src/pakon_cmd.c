@@ -1,6 +1,8 @@
+#define _POSIX_C_SOURCE 200809L   /* nanosleep */
 #include "pakon_cmd.h"
 
 #include <string.h>
+#include <time.h>
 
 pakon_result pakon_cmd(pakon_dev *dev, const pakon_packet *cmd,
                        pakon_packet *reply, unsigned timeout_ms)
@@ -84,4 +86,103 @@ pakon_pic_state pakon_probe_pic(pakon_dev *dev, uint8_t pic_address,
     if (status == PS_NOT_ACKED)
         return PAKON_PIC_ABSENT;
     return PAKON_PIC_ERROR;
+}
+
+#define BUSY_POLL_TRIES  44
+#define REPLY_TRIES      3
+
+static void sleep_ms(unsigned ms)
+{
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+static int is_bootloader(uint8_t a)
+{
+    return a == AD_BOOT_PICL || a == AD_BOOT_PICM ||
+           a == AD_BOOT_PICL_PLUS || a == AD_BOOT_PICM_PLUS;
+}
+
+/* Flags byte of a READ/STATUS reply: error bits (0x04 does not count from
+ * the host). */
+static int flags_error(uint8_t addr, uint8_t flags)
+{
+    return (flags & 0x20) || (addr != AD_HOST && (flags & 0x04));
+}
+
+static pakon_result run_one(pakon_dev *dev, const pakon_packet *pkt,
+                            unsigned timeout_ms)
+{
+    uint8_t addr = pkt->data[0];
+    pakon_packet reply;
+    pakon_result r;
+
+    if (pkt->type == PH_READ_STATUS) {
+        for (unsigned t = 1; t <= BUSY_POLL_TRIES; t++) {
+            r = pakon_cmd(dev, pkt, &reply, timeout_ms);
+            if (r != PAKON_OK)
+                return r;
+            if (reply.type != PH_READ_STATUS || reply.count < 2 ||
+                pakon_packet_addr(&reply) != addr)
+                return PAKON_ERR_PROTO;
+            uint8_t flags = reply.data[1];
+            if (flags_error(addr, flags))
+                return PAKON_ERR_STATUS;
+            if (!(flags & 0x01))
+                return PAKON_OK;
+            sleep_ms(t);   /* growing delay */
+        }
+        pakon_logf(PAKON_LOG_ERROR, "busy poll 0x%02x: still busy after %d tries",
+                   addr, BUSY_POLL_TRIES);
+        return PAKON_ERR_TIMEOUT;
+    }
+
+    for (unsigned t = 1; t <= REPLY_TRIES; t++) {
+        r = pakon_cmd(dev, pkt, &reply, timeout_ms);
+        if (r != PAKON_OK)
+            return r;
+        if (reply.count < 2 || pakon_packet_addr(&reply) != addr)
+            return PAKON_ERR_PROTO;
+        uint8_t st = reply.data[1];
+        if (pkt->type == PH_READ) {
+            if (reply.type != PH_READ)
+                return PAKON_ERR_PROTO;
+            if (flags_error(addr, st))
+                return PAKON_ERR_STATUS;
+            if (!(st & 0x11))
+                return PAKON_OK;
+        } else {
+            if (reply.type != PH_RESPONSE)
+                return PAKON_ERR_PROTO;
+            if (st == PS_SUCCESS || st == PS_SUCCESS_8)
+                return PAKON_OK;
+            if (st != PS_BAD_CHECKSUM && st != PS_USB_6 && st != PS_BUS_ERROR)
+                return PAKON_ERR_STATUS;
+        }
+        pakon_logf(PAKON_LOG_WARN, "frame to 0x%02x: status 0x%02x, retry %u",
+                   addr, st, t);
+    }
+    return PAKON_ERR_STATUS;
+}
+
+pakon_result pakon_cmd_run_seq(pakon_dev *dev, const pakon_seq *seq,
+                               unsigned timeout_ms)
+{
+    if (!dev || !seq || seq->overflow)
+        return PAKON_ERR_PARAM;
+    /* Safety rules: check the whole sequence before sending any of it. */
+    for (size_t i = 0; i < seq->n; i++) {
+        const pakon_packet *p = &seq->pkt[i];
+        if (p->type == PH_INVALID || p->count == 0 || is_bootloader(p->data[0]))
+            return PAKON_ERR_PARAM;
+    }
+    for (size_t i = 0; i < seq->n; i++) {
+        pakon_result r = run_one(dev, &seq->pkt[i], timeout_ms);
+        if (r != PAKON_OK) {
+            pakon_logf(PAKON_LOG_ERROR, "sequence stopped at frame %zu: %s",
+                       i, pakon_result_str(r));
+            return r;
+        }
+    }
+    return PAKON_OK;
 }

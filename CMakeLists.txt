@@ -22,6 +22,8 @@ add_library(pakon STATIC
   src/pakon_cmd.c
   src/pakon_usb.c
   src/pakon_calib.c
+  src/pakon_eeprom.c
+  src/pakon_setup.c
 )
 target_include_directories(pakon PUBLIC ${CMAKE_SOURCE_DIR}/include)
 # libusb is an implementation detail of the transport layer, but a static
@@ -52,6 +54,15 @@ add_test(NAME test_hex COMMAND test_hex)
 add_executable(test_calib test/test_calib.c)
 target_link_libraries(test_calib PRIVATE pakon)
 add_test(NAME test_calib COMMAND test_calib)
+
+add_executable(test_eeprom_c test/test_eeprom_c.c)
+target_link_libraries(test_eeprom_c PRIVATE pakon)
+add_test(NAME test_eeprom_c
+  COMMAND test_eeprom_c ${CMAKE_SOURCE_DIR}/test/fixtures/eeprom)
+
+add_executable(test_setup test/test_setup.c)
+target_link_libraries(test_setup PRIVATE pakon)
+add_test(NAME test_setup COMMAND test_setup ${CMAKE_SOURCE_DIR}/resources)
 
 # EEPROM decoding and mocked read-only transfers require only Python stdlib.
 find_package(Python3 COMPONENTS Interpreter QUIET)
