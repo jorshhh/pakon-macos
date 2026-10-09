@@ -109,7 +109,7 @@ LED geometry" in this repo.
 | `0x91` (write 3) | scan-line trigger: u16 value + mode byte; also resets the DX position counter. Value per resolution/IR in `docs/TLB_FINDINGS.md` |
 | `0x92` (command) | end acquisition / DX window |
 | `0x90` (read 30) | sensor/DX entries; read only when flagged by the event service |
-| `0x93` (read 4) | the four DX detector levels |
+| `0x93` (read 4) | the four DX detector levels: bytes 0–1 entry sensor, 2–3 exit sensor (film presence); empty ~190–224, film < 170 on serial 3054 [C] |
 | `0x94` / `0x96` | DX hardware setup / DX pot values (calibration only) |
 
 ## SCN — film motor [C]

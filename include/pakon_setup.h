@@ -141,6 +141,37 @@ pakon_result pakon_setup_scan_start(pakon_seq *seq, pakon_setup_state *state,
 uint16_t pakon_setup_motor_speed(uint16_t eeprom_speed, uint16_t adjust,
                                  int plus);
 
+/* Advance speed in the F-135 film-advance capture (resources/advance.pakscan,
+ * serial 3054): 0x251C = 9500, the top of the F-135 range. How the OEM
+ * derives it is not known (it is not that unit's EEPROM Base 4 speed, 8302). */
+#define PAKON_SETUP_ADVANCE_SPEED_F135  0x251Cu
+
+/* Transport run without scanning (as in advance.pakscan): SCN 0xA5 = speed,
+ * SCN 0xA0 (forward). Same speed clamps as pakon_setup_scan_start. */
+pakon_result pakon_setup_motor_run(pakon_seq *seq, const pakon_setup_state *state,
+                                   uint16_t speed);
+
+/* Release the drive: SCN 0xA2. Only stops the motor while acquire is off
+ * (use pakon_setup_teardown after a scan). */
+pakon_result pakon_setup_motor_stop(pakon_seq *seq, const pakon_setup_state *state);
+
+/* `01 03 LOW 04 93`: read the four DX detector levels (the exit-side sensor
+ * doubles as the film-presence sensor, pakon-reference dx-barcode.md). */
+void pakon_sense_read_frame(pakon_packet *pkt, uint8_t low);
+
+/*
+ * Film sensing from the 0x93 levels (serial 3054, 2026-10-09, film-sense run):
+ * bytes 0-1 are the entry DX sensor, bytes 2-3 the exit one. Empty: 190 /
+ * 216 / 224 / 202. Under film at least one byte of the pair stays below 170
+ * (highest film pair seen: 141 / 164). A pair is clear when both bytes are
+ * at or above PAKON_SENSE_CLEAR_LEVEL. The DX pots are per unit, so another
+ * scanner's levels may differ.
+ */
+#define PAKON_SENSE_CLEAR_LEVEL  170u
+enum { PAKON_SENSE_ENTRY = 0, PAKON_SENSE_EXIT = 1 };
+
+int pakon_sense_clear(const uint8_t level[4], int sensor);
+
 /* ---- Event service (OEM Thread_PpbInterrupt, docs/PROTOCOL.md) -----------
  *
  * Poll the host `03 01 10`; if its flags carry PAKON_HOST_FLAG_EVENT, read

@@ -445,6 +445,53 @@ int main(int argc, char **argv)
               "motor speed above the F-135 range refused");
     }
 
+    /* Film advance, against resources/advance.pakscan (event traffic aside):
+     * 02052402a51c25, 030124, 04032400a0, 030124, ..., 04032400a2, 030124. */
+    {
+        pakon_seq seq;
+        pakon_setup_state st;
+        char hx[512];
+        pakon_seq_init(&seq);
+        pakon_setup_init(&seq, AD_PICL, AD_PICM, PAKON_SETUP_LED_PERIOD_F135, &st);
+        pakon_seq_init(&seq);
+        CHECK(pakon_setup_motor_run(&seq, &st, PAKON_SETUP_ADVANCE_SPEED_F135)
+                  == PAKON_OK && seq.n == 4 &&
+              seq.pkt[1].type == PH_READ_STATUS && seq.pkt[3].type == PH_READ_STATUS,
+              "advance run: speed + start, each with its busy poll");
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "02052402a51c25 04032400a0"), "advance run as captured");
+        pakon_seq_init(&seq);
+        pakon_setup_motor_stop(&seq, &st);
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "04032400a2") && seq.n == 2, "advance stop as captured");
+        pakon_seq_init(&seq);
+        CHECK(pakon_setup_motor_run(&seq, &st, 9501) == PAKON_ERR_PARAM && seq.n == 0,
+              "advance speed above the F-135 range refused");
+        pakon_packet pkt;
+        pakon_sense_read_frame(&pkt, AD_PICL);
+        CHECK(pkt.type == PH_READ && pkt.count == 3 && pkt.data[1] == 4 &&
+              pkt.data[2] == 0x93, "DX level read 01 03 20 04 93");
+    }
+
+    /* Film sensing, readings from the 2026-10-09 film-sense run. */
+    {
+        const uint8_t empty[4] = { 190, 216, 224, 202 };
+        const uint8_t head_in[4] = { 89, 109, 223, 194 };     /* 3.32 s */
+        const uint8_t both[4] = { 141, 164, 108, 69 };        /* 15.42 s, highest */
+        const uint8_t at_exit[4] = { 190, 216, 106, 110 };    /* stalled tail */
+        const uint8_t spike[4] = { 120, 8, 107, 102 };
+        CHECK(pakon_sense_clear(empty, PAKON_SENSE_ENTRY) &&
+              pakon_sense_clear(empty, PAKON_SENSE_EXIT), "empty: both clear");
+        CHECK(!pakon_sense_clear(head_in, PAKON_SENSE_ENTRY) &&
+              pakon_sense_clear(head_in, PAKON_SENSE_EXIT), "head at entry only");
+        CHECK(!pakon_sense_clear(both, PAKON_SENSE_ENTRY) &&
+              !pakon_sense_clear(both, PAKON_SENSE_EXIT),
+              "film under both (highest entry levels seen)");
+        CHECK(pakon_sense_clear(at_exit, PAKON_SENSE_ENTRY) &&
+              !pakon_sense_clear(at_exit, PAKON_SENSE_EXIT), "tail stalled at exit");
+        CHECK(!pakon_sense_clear(spike, PAKON_SENSE_ENTRY), "DX code dip still film");
+    }
+
     /* Integration above the FPGA limit is refused. */
     {
         pakon_seq seq;

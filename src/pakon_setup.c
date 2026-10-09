@@ -334,6 +334,40 @@ pakon_result pakon_setup_scan_start(pakon_seq *seq, pakon_setup_state *state,
     return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
 }
 
+pakon_result pakon_setup_motor_run(pakon_seq *seq, const pakon_setup_state *state,
+                                   uint16_t speed)
+{
+    if (!seq || !state)
+        return PAKON_ERR_PARAM;
+    int plus = state->low != AD_PICL;
+    if (speed < (plus ? 1000 : 400) || speed > (plus ? 32766 : 9500))
+        return PAKON_ERR_PARAM;
+    write_reg(seq, state->scn, 0xA5, (const uint8_t[]){ (uint8_t)speed,
+                                                        (uint8_t)(speed >> 8) }, 2);
+    command(seq, state->scn, 0xA0);
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}
+
+pakon_result pakon_setup_motor_stop(pakon_seq *seq, const pakon_setup_state *state)
+{
+    if (!seq || !state)
+        return PAKON_ERR_PARAM;
+    command(seq, state->scn, 0xA2);
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}
+
+void pakon_sense_read_frame(pakon_packet *pkt, uint8_t low)
+{
+    const uint8_t d[3] = { low, 0x04, 0x93 };
+    pakon_packet_build(pkt, PH_READ, d, sizeof d);
+}
+
+int pakon_sense_clear(const uint8_t level[4], int sensor)
+{
+    const uint8_t *p = level + (sensor == PAKON_SENSE_EXIT ? 2 : 0);
+    return p[0] >= PAKON_SENSE_CLEAR_LEVEL && p[1] >= PAKON_SENSE_CLEAR_LEVEL;
+}
+
 void pakon_event_read_frame(pakon_packet *pkt, uint8_t addr)
 {
     const uint8_t d[3] = { addr, 0x01, 0x02 };
