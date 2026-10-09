@@ -121,6 +121,26 @@ pakon_result pakon_setup_leds(pakon_seq *seq, const pakon_setup_state *state,
                               const uint16_t duty[4] /* R, G, B, IR */,
                               uint16_t period);
 
+/*
+ * Scan start after calibration (OEM FN_bBeforeScan, as in scan.pakscan):
+ * acquire off, ResetFifos, bank 0x82 reg 4 = the scan pixel start (the
+ * EEPROM Offset), LOW 0x80 = 0x03 and 0x82 = the scan duties (currents stay
+ * as calibrated), SCN 0xA5 = motor speed, SCN 0xA0 (motor forward), acquire
+ * on, LOW 0x91 = trigger. Updates state->reg4. Refuses a speed outside the
+ * board's clamp (F-135 400-9500, F-135+ 1000-32766) or a duty above
+ * period - 2.
+ */
+pakon_result pakon_setup_scan_start(pakon_seq *seq, pakon_setup_state *state,
+                                    uint16_t pixel_start,
+                                    const uint16_t duty[4] /* R, G, B, IR */,
+                                    uint16_t period, uint16_t motor_speed,
+                                    uint16_t trigger);
+
+/* Motor speed from the EEPROM: MotorSpeed(_Ir) * adjust / 1000 (adjust
+ * clamped 900-1100), clamped to the board's range. */
+uint16_t pakon_setup_motor_speed(uint16_t eeprom_speed, uint16_t adjust,
+                                 int plus);
+
 /* ---- Event service (OEM Thread_PpbInterrupt, docs/PROTOCOL.md) -----------
  *
  * Poll the host `03 01 10`; if its flags carry PAKON_HOST_FLAG_EVENT, read

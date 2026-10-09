@@ -410,6 +410,41 @@ int main(int argc, char **argv)
                   == PAKON_ERR_PARAM, "IR current with IR off refused");
     }
 
+    /* Scan start, against scan.pakscan lines 1688-1724 (status-LED words
+     * and image reads aside). Scan duties B 0x5A2 IR 0x548 R 0x4DF G 0x6EF;
+     * speed 0x0615 = serial 3054's Base 16 MotorSpeed_Ir 1557 x 1000/1000. */
+    {
+        pakon_seq seq;
+        pakon_setup_state st;
+        char hx[2048];
+        pakon_seq_init(&seq);
+        pakon_setup_init(&seq, AD_PICL, AD_PICM, PAKON_SETUP_LED_PERIOD_F135, &st);
+        st.reg0 = 0x0160;
+        CHECK(pakon_setup_motor_speed(1557, 1000, 0) == 0x0615,
+              "motor speed 1557 x 1000 / 1000 = 0x0615");
+        CHECK(pakon_setup_motor_speed(1557, 1200, 0) == 1712 &&
+              pakon_setup_motor_speed(100, 1000, 0) == 400 &&
+              pakon_setup_motor_speed(25726, 1000, 1) == 25726,
+              "motor speed: adjust and range clamps");
+        pakon_seq_init(&seq);
+        CHECK(pakon_setup_scan_start(&seq, &st, 43,
+                                     (const uint16_t[]){ 0x4DF, 0x6EF, 0x5A2, 0x548 },
+                                     0x742, 0x0615, 0x0010) == PAKON_OK,
+              "scan start built");
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "0206240382006001 020410018402 040320008a "
+                          "0206240382042b00 020420018003 "
+                          "020f200c82a2054805df040000ef064207 "
+                          "02052402a51506 04032400a0 0206240382006101 "
+                          "0206200391100001"),
+              "scan start matches the capture");
+        pakon_seq_init(&seq);
+        CHECK(pakon_setup_scan_start(&seq, &st, 43,
+                                     (const uint16_t[]){ 1, 1, 1, 1 }, 0x742,
+                                     9501, 0x0010) == PAKON_ERR_PARAM && seq.n == 0,
+              "motor speed above the F-135 range refused");
+    }
+
     /* Integration above the FPGA limit is refused. */
     {
         pakon_seq seq;

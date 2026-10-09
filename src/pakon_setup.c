@@ -284,6 +284,56 @@ pakon_result pakon_setup_leds(pakon_seq *seq, const pakon_setup_state *state,
     return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
 }
 
+uint16_t pakon_setup_motor_speed(uint16_t eeprom_speed, uint16_t adjust,
+                                 int plus)
+{
+    if (adjust < 900)
+        adjust = 900;
+    if (adjust > 1100)
+        adjust = 1100;
+    unsigned long v = (unsigned long)eeprom_speed * adjust / 1000;
+    unsigned lo = plus ? 1000 : 400, hi = plus ? 32766 : 9500;
+    return (uint16_t)(v < lo ? lo : v > hi ? hi : v);
+}
+
+pakon_result pakon_setup_scan_start(pakon_seq *seq, pakon_setup_state *state,
+                                    uint16_t pixel_start, const uint16_t duty[4],
+                                    uint16_t period, uint16_t motor_speed,
+                                    uint16_t trigger)
+{
+    if (!seq || !state || !duty)
+        return PAKON_ERR_PARAM;
+    int plus = state->low != AD_PICL;
+    if (motor_speed < (plus ? 1000 : 400) || motor_speed > (plus ? 32766 : 9500))
+        return PAKON_ERR_PARAM;
+    for (int c = 0; c < 4; c++)
+        if (period < 2 || duty[c] > period - 2)
+            return PAKON_ERR_PARAM;
+    uint8_t low = state->low, scn = state->scn;
+
+    write_fpga(seq, scn, BANK_CCD, 0x0, (uint16_t)(state->reg0 & ~1u));
+    reset_fifos(seq, low);
+    state->reg4 = pixel_start;
+    write_fpga(seq, scn, BANK_CCD, 0x4, pixel_start);
+
+    const uint16_t d[6] = { duty[2], duty[3], duty[0], 0, duty[1], period };
+    uint8_t bytes[12];
+    for (int i = 0; i < 6; i++) {
+        bytes[2 * i] = (uint8_t)d[i];
+        bytes[2 * i + 1] = (uint8_t)(d[i] >> 8);
+    }
+    write_u8(seq, low, 0x80, (state->reg0 & 0x100) ? 0x03 : 0x01);
+    write_reg(seq, low, 0x82, bytes, sizeof bytes);
+
+    write_reg(seq, scn, 0xA5, (const uint8_t[]){ (uint8_t)motor_speed,
+                                                 (uint8_t)(motor_speed >> 8) }, 2);
+    command(seq, scn, 0xA0);
+    write_fpga(seq, scn, BANK_CCD, 0x0, (uint16_t)(state->reg0 | 1u));
+    write_reg(seq, low, 0x91, (const uint8_t[]){ (uint8_t)trigger,
+                                                 (uint8_t)(trigger >> 8), 0x01 }, 3);
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}
+
 void pakon_event_read_frame(pakon_packet *pkt, uint8_t addr)
 {
     const uint8_t d[3] = { addr, 0x01, 0x02 };

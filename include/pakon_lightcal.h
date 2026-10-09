@@ -92,6 +92,12 @@ uint16_t pakon_lc_duty_start(uint16_t cap, unsigned current);
 /* Refine step: duty * 63968 / peak (IR 39968), clamped to [1, period - 2]. */
 uint16_t pakon_lc_duty_next(int ch, uint16_t duty, unsigned peak, uint16_t period);
 
+/* Settled: peak in the refine window, or the refine step would move the
+ * duty by at most one tick. At small duties one tick is wider than the
+ * 64-count window (B at 273: ~234 counts), so the window alone is not
+ * reached reliably with ~+/-50 counts of measurement noise. */
+int pakon_lc_duty_settled(int ch, uint16_t duty, unsigned peak, uint16_t period);
+
 /* Scan duty for film: open-gate duty * 10^D, clamped to period - 2. */
 uint16_t pakon_lc_scan_duty(uint16_t open_duty, double density, uint16_t period);
 

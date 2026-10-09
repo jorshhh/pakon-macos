@@ -1659,29 +1659,29 @@ static void lc_sleep_ms(unsigned ms)
     nanosleep(&ts, NULL);
 }
 
-static int do_light_cal(unsigned timeout, const char *eeprom_dir)
+typedef struct {
+    int      gain[3], off[3];   /* R, G, B */
+    unsigned cur[4];            /* R, G, B, IR */
+    uint16_t duty[4];           /* open-gate duties, R, G, B, IR */
+} lc_result;
+
+/* The calibration itself, on a session after setup_session (F-135, Base 16
+ * + IR, period 0x742). Leaves acquire on and the LEDs at the open-gate
+ * values. Returns 0 on convergence. */
+static int light_cal_run(pakon_dev *dev, pakon_setup_state *st, unsigned t,
+                         unsigned offset, lc_result *res)
 {
-    pakon_ctx *ctx;
-    pakon_dev *dev;
-    pakon_eeprom e;
-    pakon_setup_state st;
-    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
-        return 1;
-    unsigned t = timeout < 2000 ? 2000 : timeout;
-    unsigned offset = e.base[PAKON_EEPROM_BASE16].offset;
-    size_t line_px = (size_t)(st.reg5 - st.reg4);
+    size_t line_px = (size_t)(st->reg5 - st->reg4);
     uint16_t *samples = malloc((size_t)PROBE_CHUNKS * PROBE_CHUNK);
     const uint16_t period = 0x742;   /* 0x0C1A * 0.6 (Base 16 + IR) */
     const char *nm[4] = { "R", "G", "B", "IR" };
-    int rc = 1, gain[3], off[3];
+    int gain[3], off[3];
     pakon_lc_stats black, active;
     pakon_seq seq;
 
-    if (st.low != AD_PICL) {
-        fprintf(stderr, "light-cal: F-135 only for now\n");
-        goto out;
-    }
-    pakon_cmd_service_events(dev, st.low, st.scn, t, NULL, NULL);
+    if (!samples)
+        return 1;
+    pakon_cmd_service_events(dev, st->low, st->scn, t, NULL, NULL);
 
     /* 1. Dark offsets, LEDs off. */
     for (int c = 0; c < 3; c++) {
@@ -1692,22 +1692,22 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
      * the IR block; the RGB black pixels stay dark. */
     pakon_seq_init(&seq);
     pakon_led_values ir_only = { 0, 0, 0, 1 };
-    if (pakon_setup_leds(&seq, &st, 0x02, &ir_only,
+    if (pakon_setup_leds(&seq, st, 0x02, &ir_only,
                          (const uint16_t[]){ 0, 0, 0, (period - 2) / 2 },
                          period) != PAKON_OK)
-        goto stop;
-    pakon_setup_acquire(&seq, &st, 1);
+        goto fail;
+    pakon_setup_acquire(&seq, st, 1);
     if (pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
-        goto stop;
+        goto fail;
     int dark_ok = 0;
     for (int it = 1; it <= PAKON_LC_DARK_ITERS && !dark_ok; it++) {
         pakon_seq_init(&seq);
-        pakon_setup_afe(&seq, &st, gain, off);
+        pakon_setup_afe(&seq, st, gain, off);
         if (pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
-            goto stop;
+            goto fail;
         lc_sleep_ms(LC_AFE_SETTLE_MS);
-        if (lc_measure(dev, &st, t, line_px, offset, samples, &black, &active))
-            goto stop;
+        if (lc_measure(dev, st, t, line_px, offset, samples, &black, &active))
+            goto fail;
         printf("dark %d: offsets %d/%d/%d -> black means %.0f/%.0f/%.0f\n", it,
                off[0], off[1], off[2], black.mean[0], black.mean[1], black.mean[2]);
         dark_ok = 1;
@@ -1719,7 +1719,7 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
     }
     if (!dark_ok) {
         fprintf(stderr, "light-cal: dark offsets did not converge\n");
-        goto stop;
+        goto fail;
     }
 
     /* 2. LED current search at the calibration duty caps. */
@@ -1734,12 +1734,12 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
         pakon_led_values cur = { (uint8_t)curv[0], (uint8_t)curv[1],
                                  (uint8_t)curv[2], (uint8_t)curv[3] };
         pakon_seq_init(&seq);
-        if (pakon_setup_leds(&seq, &st, 0x03, &cur, duty, period) != PAKON_OK ||
+        if (pakon_setup_leds(&seq, st, 0x03, &cur, duty, period) != PAKON_OK ||
             pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
-            goto stop;
+            goto fail;
         lc_sleep_ms(100);
-        if (lc_measure(dev, &st, t, line_px, offset, samples, &black, &active))
-            goto stop;
+        if (lc_measure(dev, st, t, line_px, offset, samples, &black, &active))
+            goto fail;
         printf("current %d: R%u G%u B%u IR%u -> peaks %u/%u/%u/%u\n", pass,
                curv[0], curv[1], curv[2], curv[3], active.peak[0], active.peak[1],
                active.peak[2], active.peak[3]);
@@ -1765,18 +1765,18 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
         pakon_led_values cur = { (uint8_t)curv[0], (uint8_t)curv[1],
                                  (uint8_t)curv[2], (uint8_t)curv[3] };
         pakon_seq_init(&seq);
-        if (pakon_setup_leds(&seq, &st, 0x03, &cur, duty, period) != PAKON_OK ||
+        if (pakon_setup_leds(&seq, st, 0x03, &cur, duty, period) != PAKON_OK ||
             pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
-            goto stop;
+            goto fail;
         lc_sleep_ms(converged ? 200 : 100);
-        if (lc_measure(dev, &st, t, line_px, offset, samples, &black, &active))
-            goto stop;
+        if (lc_measure(dev, st, t, line_px, offset, samples, &black, &active))
+            goto fail;
         printf("refine %d: duties %u/%u/%u/%u -> peaks %u/%u/%u/%u\n", it,
                duty[0], duty[1], duty[2], duty[3], active.peak[0], active.peak[1],
                active.peak[2], active.peak[3]);
         int ok = 1;
         for (int c = 0; c < 4; c++) {
-            if (pakon_lc_peak_ok(c, active.peak[c]))
+            if (pakon_lc_duty_settled(c, duty[c], active.peak[c], period))
                 continue;
             ok = 0;
             uint16_t next = pakon_lc_duty_next(c, duty[c], active.peak[c], period);
@@ -1787,11 +1787,11 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
                 else if (c < 3 && gain[c] < PAKON_LC_GAIN_MAX) {
                     gain[c]++;
                     pakon_seq_init(&seq);
-                    pakon_setup_afe(&seq, &st, gain, off);
+                    pakon_setup_afe(&seq, st, gain, off);
                     pakon_cmd_run_seq(dev, &seq, t);
                 } else {
                     fprintf(stderr, "light-cal: insufficient light on %s\n", nm[c]);
-                    goto stop;
+                    goto fail;
                 }
             }
             duty[c] = next;
@@ -1800,16 +1800,52 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
     }
     if (converged < 2) {
         fprintf(stderr, "light-cal: duties did not converge\n");
-        goto stop;
+        goto fail;
     }
 
+    for (int c = 0; c < 4; c++) {
+        res->cur[c] = curv[c];
+        res->duty[c] = duty[c];
+    }
+    for (int c = 0; c < 3; c++) {
+        res->gain[c] = gain[c];
+        res->off[c] = off[c];
+    }
+    free(samples);
+    return 0;
+fail:
+    free(samples);
+    return 1;
+}
+
+static int do_light_cal(unsigned timeout, const char *eeprom_dir)
+{
+    pakon_ctx *ctx;
+    pakon_dev *dev;
+    pakon_eeprom e;
+    pakon_setup_state st;
+    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
+        return 1;
+    unsigned t = timeout < 2000 ? 2000 : timeout;
+    const uint16_t period = 0x742;
+    const char *nm[4] = { "R", "G", "B", "IR" };
+    int rc = 1;
+    lc_result res;
+    pakon_seq seq;
+
+    if (st.low != AD_PICL) {
+        fprintf(stderr, "light-cal: F-135 only for now\n");
+        goto out;
+    }
+    if (light_cal_run(dev, &st, t, e.base[PAKON_EEPROM_BASE16].offset, &res))
+        goto stop;
     printf("\n=== light calibration (serial %u, Base 16 + IR) ===\n", e.serial);
     printf("        current  open-gate duty  scan duty (C-41)\n");
     for (int c = 0; c < 4; c++)
-        printf("  %-3s   %7u  %14u  %16u\n", nm[c], curv[c], duty[c],
-               pakon_lc_scan_duty(duty[c], pakon_lc_density_c41[c], period));
-    printf("  gains %d/%d/%d, offsets %d/%d/%d\n", gain[0], gain[1], gain[2],
-           off[0], off[1], off[2]);
+        printf("  %-3s   %7u  %14u  %16u\n", nm[c], res.cur[c], res.duty[c],
+               pakon_lc_scan_duty(res.duty[c], pakon_lc_density_c41[c], period));
+    printf("  gains %d/%d/%d, offsets %d/%d/%d\n", res.gain[0], res.gain[1],
+           res.gain[2], res.off[0], res.off[1], res.off[2]);
     printf("  OEM (scan.pakscan): currents R2 G3 B3 IR2, duties R896 G708 B278 "
            "IR1353, offsets -38/-31/-31\n");
     rc = 0;
@@ -1819,7 +1855,83 @@ stop:
     printf("teardown: %s\n", pakon_cmd_run_seq(dev, &seq, t) == PAKON_OK
                              ? "OK" : "FAILED");
 out:
-    free(samples);
+    session_close(ctx, dev);
+    return rc;
+}
+
+/* ---- Scan with nothing replayed (F-135, Base 16 + IR) --------------------
+ *
+ * Code-built setup, light calibration, scan start (scan pixel window, C-41
+ * scan duties, EEPROM motor speed, acquire, trigger), the --scan-sm image
+ * loop with the event service, then the code-built teardown. Only the
+ * firmware load is still a capture. Feed the film once the motor runs.
+ */
+static int do_scan_code(unsigned timeout, const char *eeprom_dir,
+                        const char *image_path, unsigned long max_mb)
+{
+    pakon_ctx *ctx;
+    pakon_dev *dev;
+    pakon_eeprom e;
+    pakon_setup_state st;
+    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
+        return 1;
+    unsigned t = timeout < 2000 ? 2000 : timeout;
+    const uint16_t period = 0x742;
+    int rc = 1;
+    lc_result res;
+    pakon_seq seq;
+    FILE *img = NULL;
+
+    if (st.low != AD_PICL) {
+        fprintf(stderr, "scan-code: F-135 only for now\n");
+        goto out;
+    }
+    if (light_cal_run(dev, &st, t, e.base[PAKON_EEPROM_BASE16].offset, &res)) {
+        fprintf(stderr, "scan-code: calibration failed\n");
+        goto stop;
+    }
+    uint16_t scan_duty[4];
+    for (int c = 0; c < 4; c++)
+        scan_duty[c] = pakon_lc_scan_duty(res.duty[c], pakon_lc_density_c41[c], period);
+    uint16_t speed = pakon_setup_motor_speed(
+        e.base[PAKON_EEPROM_BASE16].motor_speed_ir,
+        e.adjust[PAKON_EEPROM_BASE16].ir, 0);
+    printf("calibrated: offsets %d/%d/%d, currents %u/%u/%u/%u, scan duties "
+           "%u/%u/%u/%u, motor speed %u\n", res.off[0], res.off[1], res.off[2],
+           res.cur[0], res.cur[1], res.cur[2], res.cur[3], scan_duty[0],
+           scan_duty[1], scan_duty[2], scan_duty[3], speed);
+
+    img = fopen(image_path, "wb");
+    if (!img) {
+        fprintf(stderr, "cannot open image '%s'\n", image_path);
+        goto stop;
+    }
+    pakon_seq_init(&seq);
+    if (pakon_setup_scan_start(&seq, &st, (uint16_t)e.base[PAKON_EEPROM_BASE16].offset,
+                               scan_duty, period, speed, 0x0010) != PAKON_OK ||
+        pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK) {
+        fprintf(stderr, "scan-code: scan start failed\n");
+        goto stop;
+    }
+    printf("  [sm] motor start (a0) sent -- feed the film now\n");
+    fflush(stdout);
+
+    unsigned long long img_bytes = 0;
+    unsigned long nimg = 0, ncmd = 0, errs = 0;
+    int film_seen = 0;
+    sm_scan_loop(dev, img, &img_bytes, &nimg, &ncmd, &errs, timeout, max_mb,
+                 &film_seen);
+    printf("scan-code: %lu image reads, %llu bytes -> %s (%lu errors)%s\n", nimg,
+           img_bytes, image_path, errs, film_seen ? "" : " -- no film seen");
+    rc = film_seen ? 0 : 1;
+stop:
+    pakon_seq_init(&seq);
+    pakon_setup_teardown(&seq, &st);
+    printf("teardown (code-built): %s\n", pakon_cmd_run_seq(dev, &seq, t) == PAKON_OK
+                                          ? "OK" : "FAILED");
+out:
+    if (img)
+        fclose(img);
     session_close(ctx, dev);
     return rc;
 }
@@ -1954,6 +2066,7 @@ static void usage(const char *argv0)
         "       %s --setup --eeprom-dir DIR [--teardown]  controller init + Base 16 configure, built in code\n"
         "       %s --calib-probe --eeprom-dir DIR         static dark/lit line levels (F-135, open gate)\n"
         "       %s --light-cal --eeprom-dir DIR           light calibration in code (F-135, open gate)\n"
+        "       %s --scan-code --eeprom-dir DIR [--image OUT]  scan with nothing replayed (F-135)\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
@@ -1985,7 +2098,7 @@ static void usage(const char *argv0)
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -1995,6 +2108,7 @@ int main(int argc, char **argv)
     unsigned advance_seconds = 15;
     int want_calibrate = 0, cal_verbose = 0, want_read_params = 0, want_configure = 0;
     int want_setup = 0, want_teardown = 0, want_probe = 0, want_lightcal = 0;
+    int want_scan_code = 0;
     const char *eeprom_dir = NULL;
     unsigned long cal_lines = 32;
     unsigned long cal_exposure = 256;
@@ -2021,6 +2135,8 @@ int main(int argc, char **argv)
             want_read_params = 1;
         } else if (!strcmp(argv[i], "--setup")) {
             want_setup = 1;
+        } else if (!strcmp(argv[i], "--scan-code")) {
+            want_scan_code = 1;
         } else if (!strcmp(argv[i], "--light-cal")) {
             want_lightcal = 1;
         } else if (!strcmp(argv[i], "--calib-probe")) {
@@ -2075,7 +2191,7 @@ int main(int argc, char **argv)
     }
 
     if (!want_open && !want_calibrate && !want_read_params && !want_configure &&
-        !want_setup && !want_probe && !want_lightcal &&
+        !want_setup && !want_probe && !want_lightcal && !want_scan_code &&
         !scan_file && !scan_sm_file && !advance_file && !want_advance_run) {
         usage(argv[0]);
         return 2;
@@ -2083,6 +2199,8 @@ int main(int argc, char **argv)
 
     if (want_read_params)
         return do_read_params(timeout < 2000 ? 2000 : timeout, params_out);
+    if (want_scan_code)
+        return do_scan_code(timeout, eeprom_dir, image_path, max_mb);
     if (want_lightcal)
         return do_light_cal(timeout, eeprom_dir);
     if (want_probe)

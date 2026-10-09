@@ -143,6 +143,16 @@ int main(void)
     CHECK(pakon_lc_duty_next(PAKON_LC_G, 100, 0, period) == period - 2,
           "refine with no light goes to the maximum");
 
+    /* Settled: in window, or within one tick of the refine target. */
+    CHECK(pakon_lc_duty_settled(PAKON_LC_B, 273, 63958, period),
+          "settled: in window");
+    CHECK(pakon_lc_duty_settled(PAKON_LC_B, 273, 63899, period),
+          "settled: B 273 at 63899 (next step 273)");
+    CHECK(!pakon_lc_duty_settled(PAKON_LC_B, 239, 54966, period),
+          "not settled: B 239 at 54966 (next step 278)");
+    CHECK(!pakon_lc_duty_settled(PAKON_LC_G, period - 2, 50000, period),
+          "not settled: duty at its maximum and short of light");
+
     if (failures) {
         printf("\n%d test(s) FAILED\n", failures);
         return 1;

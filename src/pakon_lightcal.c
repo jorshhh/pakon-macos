@@ -140,6 +140,14 @@ uint16_t pakon_lc_duty_next(int ch, uint16_t duty, unsigned peak, uint16_t perio
     return (uint16_t)next;
 }
 
+int pakon_lc_duty_settled(int ch, uint16_t duty, unsigned peak, uint16_t period)
+{
+    if (pakon_lc_peak_ok(ch, peak))
+        return 1;
+    int next = pakon_lc_duty_next(ch, duty, peak, period);
+    return abs(next - (int)duty) <= 1 && next < period - 2;
+}
+
 uint16_t pakon_lc_scan_duty(uint16_t open_duty, double density, uint16_t period)
 {
     long d = lround(open_duty * pow(10.0, density));
