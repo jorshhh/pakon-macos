@@ -94,6 +94,33 @@ pakon_result pakon_setup_configure(pakon_seq *seq, pakon_setup_state *state,
  */
 pakon_result pakon_setup_teardown(pakon_seq *seq, const pakon_setup_state *state);
 
+/* ---- Calibration writes (TLB.dll FN_bCalibrateLEDs; docs/REGISTERS.md) ---- */
+
+/* Bank 0x82 reg 0 = configured value | 1 (acquire on) or the value alone. */
+pakon_result pakon_setup_acquire(pakon_seq *seq, const pakon_setup_state *state,
+                                 int on);
+
+/* A/D gain codes (bank 0x84 regs 2-4, <= 0x3E) and signed offsets (regs 5-7,
+ * sign-magnitude, |v| <= 255), R/G/B, in the captured order. */
+pakon_result pakon_setup_afe(pakon_seq *seq, const pakon_setup_state *state,
+                             const int gain[3], const int offset[3]);
+
+/* LED currents ceilings per board, order R, G, B, IR (REGISTERS.md). */
+typedef struct { uint8_t r, g, b, ir; } pakon_led_values;
+extern const pakon_led_values pakon_led_ceiling_f135[2];       /* [ir_on] */
+extern const pakon_led_values pakon_led_ceiling_f135_plus[2];
+
+/*
+ * LEDs: LOW 0x80 enable (bit 0 visible, bit 1 IR), 0x81 currents [B, IR, R,
+ * 0, G], 0x82 duties u16 [B, IR, R, 0, G, period]. Refuses (PAKON_ERR_PARAM,
+ * nothing added) a current above the board's ceiling for this IR state or a
+ * duty above period - 2.
+ */
+pakon_result pakon_setup_leds(pakon_seq *seq, const pakon_setup_state *state,
+                              uint8_t enable, const pakon_led_values *current,
+                              const uint16_t duty[4] /* R, G, B, IR */,
+                              uint16_t period);
+
 /* ---- Event service (OEM Thread_PpbInterrupt, docs/PROTOCOL.md) -----------
  *
  * Poll the host `03 01 10`; if its flags carry PAKON_HOST_FLAG_EVENT, read

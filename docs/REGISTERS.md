@@ -81,8 +81,10 @@ LED current ceilings (the OEM clamps to these; do not exceed):
 
 The LEDs stay on from before the scan to after it; nothing refreshes them and
 the motor does not gate them. The OEM turns them on with the motor stopped for
-calibration [C]. Our "no light in static calibration" result is most likely
-because `0x81`/`0x82` were never sent with non-zero values [I, to test].
+calibration [C]. Confirmed on serial 3054 (2026-10-09): with non-zero
+`0x81`/`0x82` the open gate reads full scale with the motor stopped; the old
+"no light in static calibration" was `0x81`/`0x82` never being sent. The IR
+LED drives only the IR block, and the visible LEDs leave it unchanged [C].
 
 ## LOW — temperatures and TEC [C]
 

@@ -260,6 +260,26 @@ static void tally_events(const char *path, size_t *acks, size_t *matched)
     }
 }
 
+/* Serialize the non-poll frames of `seq` as hex, space-separated. */
+static void seq_hex(const pakon_seq *seq, char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = 0;
+    for (size_t i = 0; i < seq->n; i++) {
+        if (seq->pkt[i].type == PH_READ_STATUS)
+            continue;
+        uint8_t wire[PAKON_PACKET_SIZE];
+        size_t wl = 0;
+        pakon_packet_serialize(&seq->pkt[i], wire, sizeof wire, &wl);
+        for (size_t k = 0; k < wl && o + 3 < cap; k++)
+            o += (size_t)snprintf(out + o, cap - o, "%02x", wire[k]);
+        if (o + 2 < cap)
+            out[o++] = ' ', out[o] = 0;
+    }
+    if (o && out[o - 1] == ' ')
+        out[o - 1] = 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -339,6 +359,55 @@ int main(int argc, char **argv)
         snprintf(msg, sizeof msg, "event follow-ups: %zu of %zu captured acks "
                  "reproduced (expect 91 of 95)", matched, acks);
         CHECK(acks == 95 && matched == 91, msg);
+    }
+
+    /* Calibration writes, against frames from scan.pakscan's calibration. */
+    {
+        pakon_seq seq;
+        pakon_setup_state st;
+        char hx[1024];
+        pakon_seq_init(&seq);
+        pakon_setup_init(&seq, AD_PICL, AD_PICM, PAKON_SETUP_LED_PERIOD_F135, &st);
+        st.reg0 = 0x0160;   /* after Base 16 + IR configure */
+
+        pakon_seq_init(&seq);
+        pakon_setup_acquire(&seq, &st, 1);
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "0206240382006101"), "acquire on = reg 0 0x0161");
+
+        pakon_seq_init(&seq);
+        pakon_setup_afe(&seq, &st, (const int[]){ 13, 13, 13 },
+                        (const int[]){ -51, -42, -43 });
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "0206240384020d00 0206240384030d00 0206240384040d00 "
+                          "0206240384053301 0206240384062a01 0206240384072b01"),
+              "AFE gains 13 and offsets -51/-42/-43 as captured");
+
+        pakon_seq_init(&seq);
+        pakon_led_values cur = { .r = 2, .g = 3, .b = 3, .ir = 2 };
+        CHECK(pakon_setup_leds(&seq, &st, 0x03, &cur,
+                               (const uint16_t[]){ 0x380, 0x2C4, 0x116, 0x549 },
+                               0x742) == PAKON_OK, "LED write accepted");
+        seq_hex(&seq, hx, sizeof hx);
+        CHECK(!strcmp(hx, "020420018003 02082005810302020003 "
+                          "020f200c821601490580030000c4024207"),
+              "LED enable, currents and converged duties as captured");
+
+        pakon_seq_init(&seq);
+        cur.r = 9;
+        CHECK(pakon_setup_leds(&seq, &st, 0x03, &cur,
+                               (const uint16_t[]){ 1, 1, 1, 1 }, 0x742)
+                  == PAKON_ERR_PARAM && seq.n == 0,
+              "current above the F-135 ceiling refused");
+        cur.r = 2;
+        CHECK(pakon_setup_leds(&seq, &st, 0x03, &cur,
+                               (const uint16_t[]){ 0x741, 1, 1, 1 }, 0x742)
+                  == PAKON_ERR_PARAM && seq.n == 0, "duty above period - 2 refused");
+        st.reg0 = 0x0060;   /* IR off: IR ceiling 0 */
+        cur = (pakon_led_values){ .r = 1, .g = 1, .b = 1, .ir = 1 };
+        CHECK(pakon_setup_leds(&seq, &st, 0x01, &cur,
+                               (const uint16_t[]){ 1, 1, 1, 1 }, 0x742)
+                  == PAKON_ERR_PARAM, "IR current with IR off refused");
     }
 
     /* Integration above the FPGA limit is refused. */

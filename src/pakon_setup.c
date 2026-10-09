@@ -216,6 +216,74 @@ pakon_result pakon_setup_teardown(pakon_seq *seq, const pakon_setup_state *state
     return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
 }
 
+pakon_result pakon_setup_acquire(pakon_seq *seq, const pakon_setup_state *state,
+                                 int on)
+{
+    if (!seq || !state)
+        return PAKON_ERR_PARAM;
+    write_fpga(seq, state->scn, BANK_CCD, 0x0,
+               (uint16_t)(on ? state->reg0 | 1u : state->reg0 & ~1u));
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}
+
+static uint16_t enc_offset(int v)
+{
+    int mag = v < 0 ? -v : v;
+    return (uint16_t)(mag | (v < 0 ? 0x100 : 0));
+}
+
+pakon_result pakon_setup_afe(pakon_seq *seq, const pakon_setup_state *state,
+                             const int gain[3], const int offset[3])
+{
+    if (!seq || !state || !gain || !offset)
+        return PAKON_ERR_PARAM;
+    for (int c = 0; c < 3; c++)
+        if (gain[c] < 0 || gain[c] > 0x3E || offset[c] < -255 || offset[c] > 255)
+            return PAKON_ERR_PARAM;
+    for (int c = 0; c < 3; c++)
+        write_fpga(seq, state->scn, BANK_AFE, (uint8_t)(2 + c), (uint16_t)gain[c]);
+    for (int c = 0; c < 3; c++)
+        write_fpga(seq, state->scn, BANK_AFE, (uint8_t)(5 + c), enc_offset(offset[c]));
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}
+
+const pakon_led_values pakon_led_ceiling_f135[2] = {
+    { .r = 6, .g = 8, .b = 8, .ir = 0 }, { .r = 8, .g = 8, .b = 8, .ir = 8 }
+};
+const pakon_led_values pakon_led_ceiling_f135_plus[2] = {
+    { .r = 4, .g = 20, .b = 20, .ir = 0 }, { .r = 8, .g = 24, .b = 24, .ir = 8 }
+};
+
+pakon_result pakon_setup_leds(pakon_seq *seq, const pakon_setup_state *state,
+                              uint8_t enable, const pakon_led_values *current,
+                              const uint16_t duty[4], uint16_t period)
+{
+    if (!seq || !state || !current || !duty || (enable & ~3u))
+        return PAKON_ERR_PARAM;
+    int ir_on = (state->reg0 & 0x100) != 0;
+    const pakon_led_values *ceil = state->low == AD_PICL
+                                   ? &pakon_led_ceiling_f135[ir_on]
+                                   : &pakon_led_ceiling_f135_plus[ir_on];
+    if (current->r > ceil->r || current->g > ceil->g || current->b > ceil->b ||
+        current->ir > ceil->ir)
+        return PAKON_ERR_PARAM;
+    for (int c = 0; c < 4; c++)
+        if (period < 2 || duty[c] > period - 2)
+            return PAKON_ERR_PARAM;
+
+    const uint16_t d[6] = { duty[2], duty[3], duty[0], 0, duty[1], period };
+    uint8_t bytes[12];
+    for (int i = 0; i < 6; i++) {
+        bytes[2 * i] = (uint8_t)d[i];
+        bytes[2 * i + 1] = (uint8_t)(d[i] >> 8);
+    }
+    write_u8(seq, state->low, 0x80, enable);
+    write_reg(seq, state->low, 0x81, (const uint8_t[]){ current->b, current->ir,
+                                                        current->r, 0, current->g }, 5);
+    write_reg(seq, state->low, 0x82, bytes, sizeof bytes);
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}
+
 void pakon_event_read_frame(pakon_packet *pkt, uint8_t addr)
 {
     const uint8_t d[3] = { addr, 0x01, 0x02 };

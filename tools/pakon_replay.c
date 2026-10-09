@@ -16,6 +16,7 @@
 #include "pakon_log.h"
 #include "pakon_eeprom.h"
 #include "pakon_setup.h"
+#include "pakon_lightcal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1397,17 +1398,22 @@ static int load_eeprom_archive(const char *dir, pakon_eeprom *e)
     return pakon_eeprom_decode(data, len, e) == PAKON_OK;
 }
 
-static int do_setup(unsigned timeout, const char *eeprom_dir, int teardown)
+/* Open the warm scanner, detect the model, check it against the EEPROM
+ * archive and send the code-built setup (Base 16 / Base 16 + IR). On success
+ * returns 0 with the device open and claimed; on failure returns 1 with
+ * everything closed. */
+static int setup_session(unsigned timeout, const char *eeprom_dir,
+                         pakon_ctx **ctx_out, pakon_dev **dev_out,
+                         pakon_eeprom *e, pakon_setup_state *st)
 {
-    pakon_eeprom e;
-    if (!eeprom_dir || !load_eeprom_archive(eeprom_dir, &e)) {
+    if (!eeprom_dir || !load_eeprom_archive(eeprom_dir, e)) {
         fprintf(stderr, "setup: need --eeprom-dir with a decodable EEPROM "
                 "archive (python3 tools/pakon_eeprom.py backup DIR)\n");
         return 1;
     }
     printf("eeprom: %s serial %u, Base 16 Offset %u\n",
-           pakon_eeprom_model(e.scanner_type), e.serial,
-           e.base[PAKON_EEPROM_BASE16].offset);
+           pakon_eeprom_model(e->scanner_type), e->serial,
+           e->base[PAKON_EEPROM_BASE16].offset);
 
     pakon_ctx *ctx = NULL;
     pakon_dev *dev = NULL;
@@ -1425,7 +1431,6 @@ static int do_setup(unsigned timeout, const char *eeprom_dir, int teardown)
         return 1;
     }
 
-    int rc = 1;
     pakon_bridge_open(dev, timeout);
     pakon_pic_state plus = pakon_probe_pic(dev, AD_PICM_PLUS, NULL, timeout);
     pakon_pic_state base = pakon_probe_pic(dev, AD_PICM, NULL, timeout);
@@ -1450,48 +1455,444 @@ static int do_setup(unsigned timeout, const char *eeprom_dir, int teardown)
     } else {
         fprintf(stderr, "setup: model detection failed (plus=%d base=%d)\n",
                 plus, base);
-        goto out;
+        goto fail;
     }
-    if ((low == AD_PICL) != (e.scanner_type == PAKON_EEPROM_TYPE_F135)) {
+    if ((low == AD_PICL) != (e->scanner_type == PAKON_EEPROM_TYPE_F135)) {
         fprintf(stderr, "setup: EEPROM archive is for a %s, scanner is not\n",
-                pakon_eeprom_model(e.scanner_type));
-        goto out;
+                pakon_eeprom_model(e->scanner_type));
+        goto fail;
     }
-    pakon_setup_pixel_window(e.base[PAKON_EEPROM_BASE16].offset, 0,
+    pakon_setup_pixel_window(e->base[PAKON_EEPROM_BASE16].offset, 0,
                              &m.pixel_start, &m.pixel_end);
 
     pakon_seq seq;
-    pakon_setup_state st;
     pakon_seq_init(&seq);
-    if (pakon_setup_init(&seq, low, scn, led_period, &st) != PAKON_OK ||
-        pakon_setup_configure(&seq, &st, &m) != PAKON_OK) {
+    if (pakon_setup_init(&seq, low, scn, led_period, st) != PAKON_OK ||
+        pakon_setup_configure(&seq, st, &m) != PAKON_OK) {
         fprintf(stderr, "setup: could not build the sequence\n");
-        goto out;
+        goto fail;
     }
     printf("sending %zu frames...\n", seq.n);
     pakon_result r = pakon_cmd_run_seq(dev, &seq, timeout < 2000 ? 2000 : timeout);
     printf("setup: %s\n", r == PAKON_OK ? "OK, configured (not acquiring)"
                                         : pakon_result_str(r));
-    if (r == PAKON_OK && teardown) {
+    if (r != PAKON_OK)
+        goto fail;
+    *ctx_out = ctx;
+    *dev_out = dev;
+    return 0;
+fail:
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+    return 1;
+}
+
+static void session_close(pakon_ctx *ctx, pakon_dev *dev)
+{
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+}
+
+static int do_setup(unsigned timeout, const char *eeprom_dir, int teardown)
+{
+    pakon_ctx *ctx;
+    pakon_dev *dev;
+    pakon_eeprom e;
+    pakon_setup_state st;
+    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
+        return 1;
+
+    unsigned t = timeout < 2000 ? 2000 : timeout;
+    pakon_result r = PAKON_OK;
+    if (teardown) {
+        pakon_seq seq;
         pakon_seq_init(&seq);
         pakon_setup_teardown(&seq, &st);
         printf("teardown: sending %zu frames...\n", seq.n);
-        r = pakon_cmd_run_seq(dev, &seq, timeout < 2000 ? 2000 : timeout);
+        r = pakon_cmd_run_seq(dev, &seq, t);
         printf("teardown: %s\n", r == PAKON_OK ? "OK" : pakon_result_str(r));
     }
     for (int pass = 1; r == PAKON_OK && pass <= 2; pass++) {
         uint8_t flags = 0;
         unsigned serviced = 0;
-        r = pakon_cmd_service_events(dev, low, scn, timeout < 2000 ? 2000 : timeout,
-                                     &flags, &serviced);
+        r = pakon_cmd_service_events(dev, st.low, st.scn, t, &flags, &serviced);
         printf("events (pass %d): host flags 0x%02x, %u acknowledged%s\n", pass,
                flags, serviced, r == PAKON_OK ? "" : pakon_result_str(r));
     }
-    rc = r == PAKON_OK ? 0 : 1;
+    session_close(ctx, dev);
+    return r == PAKON_OK ? 0 : 1;
+}
+
+/* ---- Static light probe (step 7, first milestone) ------------------------
+ *
+ * Motor stopped, open gate (no film). After the code-built setup: A/D gains
+ * 13 and serial 3054's converged dark offsets, acquire, read dark lines
+ * (LEDs off), then LEDs on at the OEM's converged currents and duties from
+ * scan.pakscan, read lit lines. Prints black-pixel means and active-pixel
+ * column peaks per channel; the OEM's targets are R/G 64000, B 65500 cap,
+ * IR 40000. Ends with the code-built teardown. F-135 only (the LED values
+ * are serial 3054's).
+ */
+#define PROBE_CHUNK    20480u
+#define PROBE_CHUNKS   40u     /* chunks measured (~51 lines) */
+
+static int probe_read(pakon_dev *dev, const pakon_setup_state *st, unsigned t,
+                      uint16_t *samples, size_t *nsamples)
+{
+    uint8_t buf[PROBE_CHUNK];
+    size_t n = 0;
+    for (unsigned i = 0; i < PROBE_CHUNKS; i++) {
+        size_t got = 0;
+        pakon_result r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN, buf, sizeof buf,
+                                        &got, SCAN_IMG_TIMEOUT_MS);
+        if (r != PAKON_OK || got == 0) {
+            fprintf(stderr, "probe: image read %u: %s (%zu bytes)\n", i,
+                    pakon_result_str(r), got);
+            return 1;
+        }
+        if (pakon_cmd_service_events(dev, st->low, st->scn, t, NULL, NULL) != PAKON_OK)
+            fprintf(stderr, "probe: event service failed at read %u\n", i);
+        for (size_t k = 0; k + 1 < got; k += 2)
+            samples[n++] = (uint16_t)(buf[k] | buf[k + 1] << 8);
+    }
+    *nsamples = n;
+    return 0;
+}
+
+/* Skip this many whole lines after a re-arm before measuring. */
+#define PROBE_SKIP_LINES 4u
+/* Minimum black-to-lit step (counts) for a line alignment to count. */
+#define LC_MIN_CONTRAST 3000.0
+
+static void probe_report(const char *label, const uint16_t *s, size_t n,
+                         size_t line_px, unsigned offset)
+{
+    const char *dump = getenv("PAKON_PROBE_DUMP");   /* debug: raw samples */
+    if (dump) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/probe-%c.raw", dump, label[0]);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fwrite(s, sizeof *s, n, f);
+            fclose(f);
+        }
+    }
+    long o = pakon_lc_find_origin(s, n, line_px, LC_MIN_CONTRAST);
+    if (o < 0) {
+        printf("%s: no light to align lines on\n", label);
+        return;
+    }
+    size_t origin = (size_t)o + PROBE_SKIP_LINES * 4 * line_px;
+    size_t act0 = offset > 6 ? offset - 6 + 3 : PAKON_LC_BLACK_PX + 20;
+    pakon_lc_stats black, active;
+    if (pakon_lc_stats_range(s, n, line_px, origin, 0, PAKON_LC_BLACK_PX, &black) ||
+        pakon_lc_stats_range(s, n, line_px, origin, act0, line_px - 10, &active)) {
+        printf("%s: not enough data (%zu samples)\n", label, n);
+        return;
+    }
+    printf("%s: %zu lines of %zu px\n", label, active.lines, line_px);
+    printf("  black px [0,%u)    mean R %.0f G %.0f B %.0f IR %.0f\n",
+           PAKON_LC_BLACK_PX, black.mean[0], black.mean[1], black.mean[2],
+           black.mean[3]);
+    printf("  active px [%zu,%zu) mean R %.0f G %.0f B %.0f IR %.0f\n", act0,
+           line_px - 10, active.mean[0], active.mean[1], active.mean[2],
+           active.mean[3]);
+    printf("  active px          peak R %u G %u B %u IR %u\n",
+           active.peak[0], active.peak[1], active.peak[2], active.peak[3]);
+}
+
+/* ResetFifos re-arm: the read that follows starts at a fixed line phase. */
+static pakon_result probe_rearm(pakon_dev *dev, const pakon_setup_state *st,
+                                unsigned t)
+{
+    const uint8_t host[4] = { AD_HOST, 0x01, 0x84, 0x02 };
+    const uint8_t arm[3] = { st->low, 0x00, 0x8A };
+    const uint8_t poll[1] = { st->low };
+    pakon_seq seq;
+    pakon_seq_init(&seq);
+    pakon_packet_build(&seq.pkt[seq.n++], PH_WRITE, host, sizeof host);
+    pakon_packet_build(&seq.pkt[seq.n++], PH_CMD, arm, sizeof arm);
+    pakon_packet_build(&seq.pkt[seq.n++], PH_READ_STATUS, poll, 1);
+    return pakon_cmd_run_seq(dev, &seq, t);
+}
+
+/* ---- Light calibration in code (step 7) ---------------------------------
+ *
+ * TLB.dll FN_bCalibrateLEDs on the open gate, motor stopped (F-135, Base 16
+ * + IR): dark offsets on the RGB black pixels (TLB.dll has the LEDs off; we
+ * keep the IR LED on so each read can be aligned, see pakon_lightcal.h), then the LED current search, then
+ * the duty refine. Every pass re-arms (ResetFifos) and reads ~46 lines.
+ * Currents never exceed the board ceiling (pakon_setup_leds refuses), duties
+ * never exceed period - 2. Prints the result next to the OEM's from
+ * scan.pakscan (currents B 3 / IR 2 / R 2 / G 3, duties B 278 / IR 1353 /
+ * R 896 / G 708). Ends with the code-built teardown.
+ */
+static int lc_measure(pakon_dev *dev, const pakon_setup_state *st, unsigned t,
+                      size_t line_px, unsigned offset, uint16_t *samples,
+                      pakon_lc_stats *black, pakon_lc_stats *active)
+{
+    size_t n = 0;
+    if (probe_rearm(dev, st, t) != PAKON_OK || probe_read(dev, st, t, samples, &n))
+        return 1;
+    long o = pakon_lc_find_origin(samples, n, line_px, LC_MIN_CONTRAST);
+    if (o < 0) {
+        fprintf(stderr, "light-cal: no light to align lines on\n");
+        return 1;
+    }
+    size_t origin = (size_t)o + PROBE_SKIP_LINES * 4 * line_px;
+    size_t act0 = offset > 6 ? offset - 6 + 3 : PAKON_LC_BLACK_PX + 20;
+    return pakon_lc_stats_range(samples, n, line_px, origin, 0, PAKON_LC_BLACK_PX,
+                                black) ||
+           pakon_lc_stats_range(samples, n, line_px, origin, act0, line_px - 10,
+                                active);
+}
+
+/* Wait after an A/D offset write: without it the dark level read right
+ * after varied by ~+/-50 counts pass to pass (one offset code ~54). */
+#define LC_AFE_SETTLE_MS 300u
+
+static void lc_sleep_ms(unsigned ms)
+{
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+static int do_light_cal(unsigned timeout, const char *eeprom_dir)
+{
+    pakon_ctx *ctx;
+    pakon_dev *dev;
+    pakon_eeprom e;
+    pakon_setup_state st;
+    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
+        return 1;
+    unsigned t = timeout < 2000 ? 2000 : timeout;
+    unsigned offset = e.base[PAKON_EEPROM_BASE16].offset;
+    size_t line_px = (size_t)(st.reg5 - st.reg4);
+    uint16_t *samples = malloc((size_t)PROBE_CHUNKS * PROBE_CHUNK);
+    const uint16_t period = 0x742;   /* 0x0C1A * 0.6 (Base 16 + IR) */
+    const char *nm[4] = { "R", "G", "B", "IR" };
+    int rc = 1, gain[3], off[3];
+    pakon_lc_stats black, active;
+    pakon_seq seq;
+
+    if (st.low != AD_PICL) {
+        fprintf(stderr, "light-cal: F-135 only for now\n");
+        goto out;
+    }
+    pakon_cmd_service_events(dev, st.low, st.scn, t, NULL, NULL);
+
+    /* 1. Dark offsets, LEDs off. */
+    for (int c = 0; c < 3; c++) {
+        gain[c] = PAKON_LC_GAIN_START;
+        off[c] = PAKON_LC_OFFSET_START;
+    }
+    /* IR LED alone (current 1, half duty) so every read can be aligned on
+     * the IR block; the RGB black pixels stay dark. */
+    pakon_seq_init(&seq);
+    pakon_led_values ir_only = { 0, 0, 0, 1 };
+    if (pakon_setup_leds(&seq, &st, 0x02, &ir_only,
+                         (const uint16_t[]){ 0, 0, 0, (period - 2) / 2 },
+                         period) != PAKON_OK)
+        goto stop;
+    pakon_setup_acquire(&seq, &st, 1);
+    if (pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
+        goto stop;
+    int dark_ok = 0;
+    for (int it = 1; it <= PAKON_LC_DARK_ITERS && !dark_ok; it++) {
+        pakon_seq_init(&seq);
+        pakon_setup_afe(&seq, &st, gain, off);
+        if (pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
+            goto stop;
+        lc_sleep_ms(LC_AFE_SETTLE_MS);
+        if (lc_measure(dev, &st, t, line_px, offset, samples, &black, &active))
+            goto stop;
+        printf("dark %d: offsets %d/%d/%d -> black means %.0f/%.0f/%.0f\n", it,
+               off[0], off[1], off[2], black.mean[0], black.mean[1], black.mean[2]);
+        dark_ok = 1;
+        for (int c = 0; c < 3; c++)
+            if (!pakon_lc_dark_ok(black.mean[c])) {
+                dark_ok = 0;
+                off[c] = pakon_lc_offset_next(off[c], black.mean[c]);
+            }
+    }
+    if (!dark_ok) {
+        fprintf(stderr, "light-cal: dark offsets did not converge\n");
+        goto stop;
+    }
+
+    /* 2. LED current search at the calibration duty caps. */
+    uint16_t cap[4], duty[4];
+    unsigned curv[4] = { 1, 1, 1, 1 };
+    int done[4] = { 0 };
+    const pakon_led_values *ceil = &pakon_led_ceiling_f135[1];
+    const unsigned ceilv[4] = { ceil->r, ceil->g, ceil->b, ceil->ir };
+    for (int c = 0; c < 4; c++)
+        duty[c] = cap[c] = pakon_lc_duty_cap(period, pakon_lc_density_c41[c]);
+    for (int pass = 1; pass <= 8; pass++) {
+        pakon_led_values cur = { (uint8_t)curv[0], (uint8_t)curv[1],
+                                 (uint8_t)curv[2], (uint8_t)curv[3] };
+        pakon_seq_init(&seq);
+        if (pakon_setup_leds(&seq, &st, 0x03, &cur, duty, period) != PAKON_OK ||
+            pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
+            goto stop;
+        lc_sleep_ms(100);
+        if (lc_measure(dev, &st, t, line_px, offset, samples, &black, &active))
+            goto stop;
+        printf("current %d: R%u G%u B%u IR%u -> peaks %u/%u/%u/%u\n", pass,
+               curv[0], curv[1], curv[2], curv[3], active.peak[0], active.peak[1],
+               active.peak[2], active.peak[3]);
+        int all = 1;
+        for (int c = 0; c < 4; c++) {
+            if (done[c])
+                continue;
+            if (pakon_lc_peak_over_cap(c, active.peak[c]) || curv[c] >= ceilv[c])
+                done[c] = 1;
+            else
+                curv[c]++;
+            all &= done[c];
+        }
+        if (all)
+            break;
+    }
+    for (int c = 0; c < 4; c++)
+        duty[c] = pakon_lc_duty_start(cap[c], curv[c]);
+
+    /* 3. Duty refine: two converged passes 200 ms apart. */
+    int converged = 0;
+    for (int it = 1; it <= PAKON_LC_REFINE_ITERS && converged < 2; it++) {
+        pakon_led_values cur = { (uint8_t)curv[0], (uint8_t)curv[1],
+                                 (uint8_t)curv[2], (uint8_t)curv[3] };
+        pakon_seq_init(&seq);
+        if (pakon_setup_leds(&seq, &st, 0x03, &cur, duty, period) != PAKON_OK ||
+            pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
+            goto stop;
+        lc_sleep_ms(converged ? 200 : 100);
+        if (lc_measure(dev, &st, t, line_px, offset, samples, &black, &active))
+            goto stop;
+        printf("refine %d: duties %u/%u/%u/%u -> peaks %u/%u/%u/%u\n", it,
+               duty[0], duty[1], duty[2], duty[3], active.peak[0], active.peak[1],
+               active.peak[2], active.peak[3]);
+        int ok = 1;
+        for (int c = 0; c < 4; c++) {
+            if (pakon_lc_peak_ok(c, active.peak[c]))
+                continue;
+            ok = 0;
+            uint16_t next = pakon_lc_duty_next(c, duty[c], active.peak[c], period);
+            if (next == duty[c] && next == period - 2) {
+                /* Duty at its maximum and still short: more current, else gain. */
+                if (curv[c] < ceilv[c])
+                    curv[c]++;
+                else if (c < 3 && gain[c] < PAKON_LC_GAIN_MAX) {
+                    gain[c]++;
+                    pakon_seq_init(&seq);
+                    pakon_setup_afe(&seq, &st, gain, off);
+                    pakon_cmd_run_seq(dev, &seq, t);
+                } else {
+                    fprintf(stderr, "light-cal: insufficient light on %s\n", nm[c]);
+                    goto stop;
+                }
+            }
+            duty[c] = next;
+        }
+        converged = ok ? converged + 1 : 0;
+    }
+    if (converged < 2) {
+        fprintf(stderr, "light-cal: duties did not converge\n");
+        goto stop;
+    }
+
+    printf("\n=== light calibration (serial %u, Base 16 + IR) ===\n", e.serial);
+    printf("        current  open-gate duty  scan duty (C-41)\n");
+    for (int c = 0; c < 4; c++)
+        printf("  %-3s   %7u  %14u  %16u\n", nm[c], curv[c], duty[c],
+               pakon_lc_scan_duty(duty[c], pakon_lc_density_c41[c], period));
+    printf("  gains %d/%d/%d, offsets %d/%d/%d\n", gain[0], gain[1], gain[2],
+           off[0], off[1], off[2]);
+    printf("  OEM (scan.pakscan): currents R2 G3 B3 IR2, duties R896 G708 B278 "
+           "IR1353, offsets -38/-31/-31\n");
+    rc = 0;
+stop:
+    pakon_seq_init(&seq);
+    pakon_setup_teardown(&seq, &st);
+    printf("teardown: %s\n", pakon_cmd_run_seq(dev, &seq, t) == PAKON_OK
+                             ? "OK" : "FAILED");
 out:
-    pakon_usb_release(dev);
-    pakon_usb_close(dev);
-    pakon_usb_exit(ctx);
+    free(samples);
+    session_close(ctx, dev);
+    return rc;
+}
+
+static int do_calib_probe(unsigned timeout, const char *eeprom_dir)
+{
+    pakon_ctx *ctx;
+    pakon_dev *dev;
+    pakon_eeprom e;
+    pakon_setup_state st;
+    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
+        return 1;
+    unsigned t = timeout < 2000 ? 2000 : timeout;
+    int rc = 1;
+    size_t cap = (size_t)PROBE_CHUNKS * PROBE_CHUNK / 2, n = 0;
+    uint16_t *samples = malloc(cap * sizeof *samples);
+    pakon_seq seq;
+
+    if (st.low != AD_PICL) {
+        fprintf(stderr, "probe: F-135 only (LED values are serial 3054's)\n");
+        goto out;
+    }
+    pakon_cmd_service_events(dev, st.low, st.scn, t, NULL, NULL);
+
+    /* Dark: gains 13, serial 3054's converged offsets, LEDs off (init). */
+    pakon_seq_init(&seq);
+    pakon_setup_afe(&seq, &st, (const int[]){ 13, 13, 13 },
+                    (const int[]){ -38, -31, -31 });
+    pakon_setup_acquire(&seq, &st, 1);
+    size_t line_px = (size_t)(st.reg5 - st.reg4);
+    if (pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK ||
+        probe_rearm(dev, &st, t) != PAKON_OK ||
+        probe_read(dev, &st, t, samples, &n))
+        goto stop;
+    probe_report("dark (LEDs off)", samples, n, line_px,
+                 e.base[PAKON_EEPROM_BASE16].offset);
+
+    /* Lit: the OEM's converged values (scan.pakscan calibration). */
+    pakon_seq_init(&seq);
+    pakon_led_values cur = { .r = 2, .g = 3, .b = 3, .ir = 2 };
+    uint16_t pduty[4] = { 0x380, 0x2C4, 0x116, 0x549 };
+    unsigned en = 0x03;
+    /* Debug override: PAKON_PROBE_LEDS="en cR cG cB cIR dR dG dB dIR". */
+    const char *ov = getenv("PAKON_PROBE_LEDS");
+    if (ov) {
+        unsigned v[9];
+        if (sscanf(ov, "%x %u %u %u %u %hu %hu %hu %hu", &en, &v[0], &v[1], &v[2],
+                   &v[3], &pduty[0], &pduty[1], &pduty[2], &pduty[3]) == 9) {
+            cur = (pakon_led_values){ (uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2],
+                                      (uint8_t)v[3] };
+            printf("LED override: enable 0x%x currents %u/%u/%u/%u duties "
+                   "%u/%u/%u/%u\n", en, v[0], v[1], v[2], v[3], pduty[0],
+                   pduty[1], pduty[2], pduty[3]);
+        }
+    }
+    if (pakon_setup_leds(&seq, &st, (uint8_t)en, &cur, pduty, 0x742) != PAKON_OK)
+        goto stop;
+    if (pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
+        goto stop;
+    if (probe_rearm(dev, &st, t) != PAKON_OK ||
+        probe_read(dev, &st, t, samples, &n))
+        goto stop;
+    probe_report("lit (OEM converged LEDs)", samples, n, line_px,
+                 e.base[PAKON_EEPROM_BASE16].offset);
+    rc = 0;
+stop:
+    pakon_seq_init(&seq);
+    pakon_setup_teardown(&seq, &st);
+    printf("teardown: %s\n", pakon_cmd_run_seq(dev, &seq, t) == PAKON_OK
+                             ? "OK" : "FAILED");
+out:
+    free(samples);
+    session_close(ctx, dev);
     return rc;
 }
 
@@ -1551,6 +1952,8 @@ static void usage(const char *argv0)
         "       %s --read-params [--params-out FILE]      dump cached calibration table\n"
         "       %s --configure [--prelude FILE]           program calibration regs from C\n"
         "       %s --setup --eeprom-dir DIR [--teardown]  controller init + Base 16 configure, built in code\n"
+        "       %s --calib-probe --eeprom-dir DIR         static dark/lit line levels (F-135, open gate)\n"
+        "       %s --light-cal --eeprom-dir DIR           light calibration in code (F-135, open gate)\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
@@ -1582,7 +1985,7 @@ static void usage(const char *argv0)
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -1591,7 +1994,7 @@ int main(int argc, char **argv)
     int want_advance_run = 0;       /* --advance: standalone or after --scan */
     unsigned advance_seconds = 15;
     int want_calibrate = 0, cal_verbose = 0, want_read_params = 0, want_configure = 0;
-    int want_setup = 0, want_teardown = 0;
+    int want_setup = 0, want_teardown = 0, want_probe = 0, want_lightcal = 0;
     const char *eeprom_dir = NULL;
     unsigned long cal_lines = 32;
     unsigned long cal_exposure = 256;
@@ -1618,6 +2021,10 @@ int main(int argc, char **argv)
             want_read_params = 1;
         } else if (!strcmp(argv[i], "--setup")) {
             want_setup = 1;
+        } else if (!strcmp(argv[i], "--light-cal")) {
+            want_lightcal = 1;
+        } else if (!strcmp(argv[i], "--calib-probe")) {
+            want_probe = 1;
         } else if (!strcmp(argv[i], "--teardown")) {
             want_teardown = 1;
         } else if (!strcmp(argv[i], "--eeprom-dir") && i + 1 < argc) {
@@ -1668,7 +2075,7 @@ int main(int argc, char **argv)
     }
 
     if (!want_open && !want_calibrate && !want_read_params && !want_configure &&
-        !want_setup &&
+        !want_setup && !want_probe && !want_lightcal &&
         !scan_file && !scan_sm_file && !advance_file && !want_advance_run) {
         usage(argv[0]);
         return 2;
@@ -1676,6 +2083,10 @@ int main(int argc, char **argv)
 
     if (want_read_params)
         return do_read_params(timeout < 2000 ? 2000 : timeout, params_out);
+    if (want_lightcal)
+        return do_light_cal(timeout, eeprom_dir);
+    if (want_probe)
+        return do_calib_probe(timeout, eeprom_dir);
     if (want_setup)
         return do_setup(timeout, eeprom_dir, want_teardown);
     if (want_configure)
