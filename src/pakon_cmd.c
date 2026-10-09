@@ -177,6 +177,8 @@ pakon_result pakon_cmd_run_seq(pakon_dev *dev, const pakon_seq *seq,
             return PAKON_ERR_PARAM;
     }
     for (size_t i = 0; i < seq->n; i++) {
+        if (seq->delay_ms[i])
+            sleep_ms(seq->delay_ms[i]);
         pakon_result r = run_one(dev, &seq->pkt[i], timeout_ms);
         if (r != PAKON_OK) {
             pakon_logf(PAKON_LOG_ERROR, "sequence stopped at frame %zu: %s",

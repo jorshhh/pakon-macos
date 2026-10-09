@@ -12,16 +12,28 @@ void pakon_seq_init(pakon_seq *seq)
 {
     seq->n = 0;
     seq->overflow = 0;
+    seq->delay_ms[0] = 0;
 }
 
 static void push(pakon_seq *seq, uint8_t type, const uint8_t *data, size_t n)
 {
+    uint16_t delay = seq->n < PAKON_SEQ_MAX ? seq->delay_ms[seq->n] : 0;
     if (seq->n >= PAKON_SEQ_MAX ||
         pakon_packet_build(&seq->pkt[seq->n], type, data, n) != PAKON_OK) {
         seq->overflow = 1;
         return;
     }
+    seq->delay_ms[seq->n] = delay;
     seq->n++;
+    if (seq->n < PAKON_SEQ_MAX)
+        seq->delay_ms[seq->n] = 0;
+}
+
+/* Wait `ms` before the next frame pushed. */
+static void delay_next(pakon_seq *seq, uint16_t ms)
+{
+    if (seq->n < PAKON_SEQ_MAX)
+        seq->delay_ms[seq->n] = ms;
 }
 
 static void busy_poll(pakon_seq *seq, uint8_t addr)
@@ -184,6 +196,22 @@ pakon_result pakon_setup_configure(pakon_seq *seq, pakon_setup_state *state,
         write_u8(seq, low, 0x89, state->low89);
     }
     reset_fifos(seq, low);
+
+    return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
+}
+
+pakon_result pakon_setup_teardown(pakon_seq *seq, const pakon_setup_state *state)
+{
+    if (!seq || !state)
+        return PAKON_ERR_PARAM;
+    uint8_t low = state->low, scn = state->scn;
+
+    write_fpga(seq, scn, BANK_CCD, 0x0, (uint16_t)(state->reg0 & ~1u));
+    write_u8(seq, low, 0x80, 0x00);              /* LEDs off */
+    reset_fifos(seq, low);
+    command(seq, low, 0x92);                     /* end acquisition */
+    delay_next(seq, 20);
+    command(seq, scn, 0xA2);                     /* release the drive */
 
     return seq->overflow ? PAKON_ERR_PARAM : PAKON_OK;
 }

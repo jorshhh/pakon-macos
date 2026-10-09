@@ -1360,6 +1360,7 @@ static int do_read_params(unsigned timeout, const char *outpath)
  * again), then sends pakon_setup_init + pakon_setup_configure with the OEM
  * reply rules. Stops before the first acquire: LEDs off, motor released.
  * Only the modes the captures verified: F-135 Base 16 + IR, F-135+ Base 16.
+ * With --teardown, then sends pakon_setup_teardown.
  */
 static int load_eeprom_archive(const char *dir, pakon_eeprom *e)
 {
@@ -1384,7 +1385,7 @@ static int load_eeprom_archive(const char *dir, pakon_eeprom *e)
     return pakon_eeprom_decode(data, len, e) == PAKON_OK;
 }
 
-static int do_setup(unsigned timeout, const char *eeprom_dir)
+static int do_setup(unsigned timeout, const char *eeprom_dir, int teardown)
 {
     pakon_eeprom e;
     if (!eeprom_dir || !load_eeprom_archive(eeprom_dir, &e)) {
@@ -1459,6 +1460,13 @@ static int do_setup(unsigned timeout, const char *eeprom_dir)
     pakon_result r = pakon_cmd_run_seq(dev, &seq, timeout < 2000 ? 2000 : timeout);
     printf("setup: %s\n", r == PAKON_OK ? "OK, configured (not acquiring)"
                                         : pakon_result_str(r));
+    if (r == PAKON_OK && teardown) {
+        pakon_seq_init(&seq);
+        pakon_setup_teardown(&seq, &st);
+        printf("teardown: sending %zu frames...\n", seq.n);
+        r = pakon_cmd_run_seq(dev, &seq, timeout < 2000 ? 2000 : timeout);
+        printf("teardown: %s\n", r == PAKON_OK ? "OK" : pakon_result_str(r));
+    }
     rc = r == PAKON_OK ? 0 : 1;
 out:
     pakon_usb_release(dev);
@@ -1522,7 +1530,7 @@ static void usage(const char *argv0)
         "       %s --calibrate [--cal-lines N] [--cal-verbose]  driven calibration\n"
         "       %s --read-params [--params-out FILE]      dump cached calibration table\n"
         "       %s --configure [--prelude FILE]           program calibration regs from C\n"
-        "       %s --setup --eeprom-dir DIR               controller init + Base 16 configure, built in code\n"
+        "       %s --setup --eeprom-dir DIR [--teardown]  controller init + Base 16 configure, built in code\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
@@ -1563,7 +1571,7 @@ int main(int argc, char **argv)
     int want_advance_run = 0;       /* --advance: standalone or after --scan */
     unsigned advance_seconds = 15;
     int want_calibrate = 0, cal_verbose = 0, want_read_params = 0, want_configure = 0;
-    int want_setup = 0;
+    int want_setup = 0, want_teardown = 0;
     const char *eeprom_dir = NULL;
     unsigned long cal_lines = 32;
     unsigned long cal_exposure = 256;
@@ -1590,6 +1598,8 @@ int main(int argc, char **argv)
             want_read_params = 1;
         } else if (!strcmp(argv[i], "--setup")) {
             want_setup = 1;
+        } else if (!strcmp(argv[i], "--teardown")) {
+            want_teardown = 1;
         } else if (!strcmp(argv[i], "--eeprom-dir") && i + 1 < argc) {
             eeprom_dir = argv[++i];
         } else if (!strcmp(argv[i], "--configure")) {
@@ -1647,7 +1657,7 @@ int main(int argc, char **argv)
     if (want_read_params)
         return do_read_params(timeout < 2000 ? 2000 : timeout, params_out);
     if (want_setup)
-        return do_setup(timeout, eeprom_dir);
+        return do_setup(timeout, eeprom_dir, want_teardown);
     if (want_configure)
         return do_configure(timeout, cal_prelude);
     if (want_calibrate)

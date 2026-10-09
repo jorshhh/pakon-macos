@@ -2,7 +2,8 @@
  * pakon_setup.h — controller init and per-mode configure, built in code.
  *
  * Builds the frames the OEM sends after model detection (from the SCN 0x97
- * controller init) up to, not including, the first acquire. Pure: frames go
+ * controller init) up to, not including, the first acquire, and the
+ * teardown after the last image read. Pure: frames go
  * into a pakon_seq, nothing is sent here (pakon_cmd_run_seq sends one).
  *
  * Transcribed from five captures (resources/scan.pakscan, F-135 serial 3054;
@@ -36,6 +37,7 @@ extern "C" {
  * pakon_cmd_run_seq). */
 typedef struct {
     pakon_packet pkt[PAKON_SEQ_MAX];
+    uint16_t delay_ms[PAKON_SEQ_MAX];   /* wait before sending pkt[i] */
     size_t n;
     int overflow;   /* set if a frame did not fit; the sequence is unusable */
 } pakon_seq;
@@ -83,6 +85,14 @@ pakon_result pakon_setup_init(pakon_seq *seq, uint8_t low, uint8_t scn,
 /* Mode configure after init (or a previous configure). Updates `state`. */
 pakon_result pakon_setup_configure(pakon_seq *seq, pakon_setup_state *state,
                                    const pakon_scan_mode *mode);
+
+/*
+ * Teardown after a scan (OEM FN_bAfterScan): bank 0x82 reg 0 back to the
+ * configured value (acquire bit clear; clearing it is what lets 0xA2 stop
+ * the motor), LEDs off, ResetFifos, LOW 0x92 (end acquisition), 20 ms,
+ * SCN 0xA2 (release the drive). Same in all seven captures.
+ */
+pakon_result pakon_setup_teardown(pakon_seq *seq, const pakon_setup_state *state);
 
 #ifdef __cplusplus
 }
