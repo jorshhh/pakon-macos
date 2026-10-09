@@ -1859,6 +1859,190 @@ out:
     return rc;
 }
 
+/* ---- Film sensing experiment (step 9) ------------------------------------
+ *
+ * Runs the transport at the captured advance speed for `seconds` while the
+ * operator feeds a strip through, reading the four DX detector levels (LOW
+ * 0x93) every ~100 ms. Prints a line whenever a level moves by more than 8,
+ * and once a second otherwise, so the entry and exit transitions of both
+ * sensors can be read off. Motor stopped with 0xA2 (acquire is never on).
+ * F-135 only.
+ */
+static int do_film_sense(unsigned timeout, const char *eeprom_dir, unsigned seconds)
+{
+    pakon_ctx *ctx;
+    pakon_dev *dev;
+    pakon_eeprom e;
+    pakon_setup_state st;
+    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
+        return 1;
+    unsigned t = timeout < 2000 ? 2000 : timeout;
+    int rc = 1;
+    pakon_seq seq;
+
+    if (st.low != AD_PICL) {
+        fprintf(stderr, "film-sense: F-135 only for now\n");
+        goto out;
+    }
+    pakon_seq_init(&seq);
+    if (pakon_setup_motor_run(&seq, &st, PAKON_SETUP_ADVANCE_SPEED_F135) != PAKON_OK ||
+        pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK) {
+        fprintf(stderr, "film-sense: motor start failed\n");
+        goto stop;
+    }
+    printf("motor running -- feed the film now (%u s)\n", seconds);
+    fflush(stdout);
+
+    struct timespec t0, now;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int last[4] = { -1000, -1000, -1000, -1000 };
+    double last_print = -1;
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double el = (now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) / 1e9;
+        if (el >= seconds)
+            break;
+        pakon_packet pkt, reply;
+        pakon_sense_read_frame(&pkt, st.low);
+        if (pakon_cmd(dev, &pkt, &reply, t) == PAKON_OK && reply.type == PH_READ &&
+            reply.count >= 6 && reply.data[0] == st.low) {
+            int v[4] = { reply.data[2], reply.data[3], reply.data[4], reply.data[5] };
+            int moved = 0;
+            for (int k = 0; k < 4; k++)
+                if (abs(v[k] - last[k]) > 8)
+                    moved = 1;
+            if (moved || el - last_print >= 1.0) {
+                printf("%6.2f s  0x93: %3d %3d %3d %3d  (flags 0x%02x)%s\n", el,
+                       v[0], v[1], v[2], v[3], reply.data[1], moved ? "  *" : "");
+                fflush(stdout);
+                memcpy(last, v, sizeof last);
+                last_print = el;
+            }
+        } else {
+            printf("%6.2f s  0x93 read failed\n", el);
+        }
+        pakon_cmd_service_events(dev, st.low, st.scn, t, NULL, NULL);
+        lc_sleep_ms(100);
+    }
+    rc = 0;
+stop:
+    pakon_seq_init(&seq);
+    pakon_setup_motor_stop(&seq, &st);
+    printf("motor stop: %s\n", pakon_cmd_run_seq(dev, &seq, t) == PAKON_OK
+                               ? "OK" : "FAILED");
+out:
+    session_close(ctx, dev);
+    return rc;
+}
+
+/* ---- Film advance and eject in code (step 9) -----------------------------
+ *
+ * --advance-code SECONDS: run the transport at the captured advance speed
+ * for a fixed time (what advance.pakscan does), event service running.
+ *
+ * --eject: run it until the strip is out, judged from the DX sensors
+ * (pakon_sense_clear): stop when, after film was under the exit sensor, both
+ * sensors are clear for 0.5 s ("out"),
+ * or when the entry sensor is clear and the exit reading has been flat for
+ * 1.5 s with film under it (the tail has left the drive rollers and has to
+ * be pulled by hand), or when no film was seen for 15 s, or after
+ * max_seconds. F-135 only.
+ */
+static int read_levels(pakon_dev *dev, const pakon_setup_state *st, unsigned t,
+                       uint8_t v[4])
+{
+    pakon_packet pkt, reply;
+    pakon_sense_read_frame(&pkt, st->low);
+    if (pakon_cmd(dev, &pkt, &reply, t) != PAKON_OK || reply.type != PH_READ ||
+        reply.count < 6 || reply.data[0] != st->low)
+        return -1;
+    memcpy(v, reply.data + 2, 4);
+    return 0;
+}
+
+static int do_transport(unsigned timeout, const char *eeprom_dir, int eject,
+                        unsigned seconds)
+{
+    pakon_ctx *ctx;
+    pakon_dev *dev;
+    pakon_eeprom e;
+    pakon_setup_state st;
+    if (setup_session(timeout, eeprom_dir, &ctx, &dev, &e, &st))
+        return 1;
+    unsigned t = timeout < 2000 ? 2000 : timeout;
+    int rc = 1;
+    pakon_seq seq;
+    const char *result = "time limit reached";
+
+    if (st.low != AD_PICL) {
+        fprintf(stderr, "transport: F-135 only for now\n");
+        goto out;
+    }
+    pakon_seq_init(&seq);
+    if (pakon_setup_motor_run(&seq, &st, PAKON_SETUP_ADVANCE_SPEED_F135) != PAKON_OK ||
+        pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK) {
+        fprintf(stderr, "transport: motor start failed\n");
+        goto stop;
+    }
+    printf("motor running (%s, at most %u s)\n", eject ? "eject" : "advance", seconds);
+    fflush(stdout);
+
+    struct timespec t0, now;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int film_seen = 0, exit_seen = 0;
+    unsigned exit_clear = 0, flat = 0, nothing = 0;
+    uint8_t prev[4] = { 0 };
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double el = (now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) / 1e9;
+        if (el >= seconds)
+            break;
+        pakon_cmd_service_events(dev, st.low, st.scn, t, NULL, NULL);
+        if (eject) {
+            uint8_t v[4];
+            if (read_levels(dev, &st, t, v) == 0) {
+                int in_clear = pakon_sense_clear(v, PAKON_SENSE_ENTRY);
+                int out_clear = pakon_sense_clear(v, PAKON_SENSE_EXIT);
+                if (!in_clear || !out_clear)
+                    film_seen = 1;
+                if (!out_clear)
+                    exit_seen = 1;
+                /* Out: the exit sensor had film and both are now clear. */
+                exit_clear = (exit_seen && in_clear && out_clear) ? exit_clear + 1 : 0;
+                nothing = (in_clear && out_clear && !film_seen) ? nothing + 1 : 0;
+                int still = abs(v[2] - prev[2]) <= 4 && abs(v[3] - prev[3]) <= 4;
+                flat = (in_clear && !out_clear && still) ? flat + 1 : 0;
+                memcpy(prev, v, 4);
+                if (exit_clear >= 5) {
+                    result = "strip is out";
+                    break;
+                }
+                if (flat >= 15) {
+                    result = "strip stalled at the exit: pull it out by hand";
+                    break;
+                }
+                if (nothing >= 150) {
+                    result = "no film in the transport";
+                    break;
+                }
+            }
+        }
+        lc_sleep_ms(100);
+    }
+    rc = 0;
+stop:
+    pakon_seq_init(&seq);
+    pakon_setup_motor_stop(&seq, &st);
+    printf("motor stop: %s\n", pakon_cmd_run_seq(dev, &seq, t) == PAKON_OK
+                               ? "OK" : "FAILED");
+    if (!rc)
+        printf("%s: %s\n", eject ? "eject" : "advance",
+               eject ? result : "done");
+out:
+    session_close(ctx, dev);
+    return rc;
+}
+
 /* ---- Scan with nothing replayed (F-135, Base 16 + IR) --------------------
  *
  * Code-built setup, light calibration, scan start (scan pixel window, C-41
@@ -2067,6 +2251,9 @@ static void usage(const char *argv0)
         "       %s --calib-probe --eeprom-dir DIR         static dark/lit line levels (F-135, open gate)\n"
         "       %s --light-cal --eeprom-dir DIR           light calibration in code (F-135, open gate)\n"
         "       %s --scan-code --eeprom-dir DIR [--image OUT]  scan with nothing replayed (F-135)\n"
+        "       %s --film-sense SECONDS --eeprom-dir DIR  run the transport, log DX levels (F-135)\n"
+        "       %s --advance-code SECONDS --eeprom-dir DIR  timed film advance in code (F-135)\n"
+        "       %s --eject [--eject-seconds N] --eeprom-dir DIR  run until the strip is out (F-135)\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
@@ -2098,7 +2285,8 @@ static void usage(const char *argv0)
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0,
+        argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -2109,6 +2297,8 @@ int main(int argc, char **argv)
     int want_calibrate = 0, cal_verbose = 0, want_read_params = 0, want_configure = 0;
     int want_setup = 0, want_teardown = 0, want_probe = 0, want_lightcal = 0;
     int want_scan_code = 0;
+    unsigned film_sense_s = 0, advance_code_s = 0, eject_s = 60;
+    int want_eject = 0;
     const char *eeprom_dir = NULL;
     unsigned long cal_lines = 32;
     unsigned long cal_exposure = 256;
@@ -2135,6 +2325,14 @@ int main(int argc, char **argv)
             want_read_params = 1;
         } else if (!strcmp(argv[i], "--setup")) {
             want_setup = 1;
+        } else if (!strcmp(argv[i], "--advance-code") && i + 1 < argc) {
+            advance_code_s = (unsigned)strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--eject")) {
+            want_eject = 1;
+        } else if (!strcmp(argv[i], "--eject-seconds") && i + 1 < argc) {
+            eject_s = (unsigned)strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--film-sense") && i + 1 < argc) {
+            film_sense_s = (unsigned)strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "--scan-code")) {
             want_scan_code = 1;
         } else if (!strcmp(argv[i], "--light-cal")) {
@@ -2192,6 +2390,7 @@ int main(int argc, char **argv)
 
     if (!want_open && !want_calibrate && !want_read_params && !want_configure &&
         !want_setup && !want_probe && !want_lightcal && !want_scan_code &&
+        !film_sense_s && !advance_code_s && !want_eject &&
         !scan_file && !scan_sm_file && !advance_file && !want_advance_run) {
         usage(argv[0]);
         return 2;
@@ -2199,6 +2398,13 @@ int main(int argc, char **argv)
 
     if (want_read_params)
         return do_read_params(timeout < 2000 ? 2000 : timeout, params_out);
+    if (want_eject)
+        return do_transport(timeout, eeprom_dir, 1, eject_s > 120 ? 120 : eject_s);
+    if (advance_code_s)
+        return do_transport(timeout, eeprom_dir, 0,
+                            advance_code_s > 120 ? 120 : advance_code_s);
+    if (film_sense_s)
+        return do_film_sense(timeout, eeprom_dir, film_sense_s > 120 ? 120 : film_sense_s);
     if (want_scan_code)
         return do_scan_code(timeout, eeprom_dir, image_path, max_mb);
     if (want_lightcal)

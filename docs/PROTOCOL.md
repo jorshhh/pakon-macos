@@ -198,9 +198,19 @@ The scanner sends no end-of-roll signal:
 ## Film advance
 
 The OEM moves film with the motor commands above: set speed (`0xA5`), start
-`0xA0` (or `0xA1` reverse), stop `0xA2`. Our tool currently replays
-`resources/advance.pakscan` (`pakon_replay advance.pakscan --steps N`), whose
-`02 05 24 02 a5 1c 25` is that speed write; replacing it is roadmap step 7.
+`0xA0` (or `0xA1` reverse), stop `0xA2`. On the F-135 the advance capture
+(`resources/advance.pakscan`) is speed `0x251C` (9500), `a0`, wait, `a2`,
+with acquire off, so `a2` alone stops it. `pakon_replay --advance-code
+SECONDS` builds the same in code.
+
+**Film sensing [C, serial 3054, 2026-10-09].** `01 03 LOW 04 93` returns the
+two DX sensors' levels: bytes 0–1 the entry sensor, bytes 2–3 the exit one
+(1.4 s apart at the advance speed). Empty: 190/216/224/202. Under film at
+least one byte of the pair stays below 170 (the DX code makes it fluctuate).
+When the tail leaves the drive rollers the strip stops under the exit sensor
+(reading flat) and has to be pulled out by hand. `pakon_replay --eject` runs
+the transport until both sensors clear after the exit one saw film, or until
+that stall, and stops.
 
 ## Current tool behaviour
 
