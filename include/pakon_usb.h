@@ -109,10 +109,20 @@ pakon_result pakon_usb_list(pakon_ctx *ctx, pakon_usb_devinfo *arr,
 /* ---- firmware download (Phase 1) ---- */
 
 /*
- * Download an Intel HEX firmware image to a cold FX2 device and wait for it to
- * re-enumerate as the warm Pakon. STUB. `hex_path` is the .hex in firmware/.
+ * Replay a captured firmware-load script (.pakfw, e.g. resources/f135.pakfw)
+ * to the cold FX2 device and wait for it to re-enumerate as the warm Pakon.
  */
-pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *hex_path);
+pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *script_path);
+
+/*
+ * Load the firmware from Intel HEX, no capture: the stage-1 loader
+ * (firmware/PknLdr.hex, from tools/extract_fx2_loader.py) and the main image
+ * (firmware/Pakon7.hex), sent as built by pakon_fw_build. Stops before the
+ * main image unless the personality the stage-1 loader reports is the
+ * F-135/F-135+ one (F235_AA07). Waits for the warm device.
+ */
+pakon_result pakon_usb_load_firmware_hex(pakon_ctx *ctx, const char *stage1_path,
+                                         const char *main_path);
 
 /* ---- open / close (Phase 1-2) ---- */
 

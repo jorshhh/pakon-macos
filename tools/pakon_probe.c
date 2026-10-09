@@ -23,12 +23,14 @@
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s [--list] [--load-firmware HEX]\n"
+        "usage: %s [--list] [--load-firmware PAKFW] [--load-firmware-hex STAGE1 MAIN]\n"
         "       %s --raw HEX --out 0xNN [--in 0xNN] [--alt N] [--timeout MS]\n"
         "  (default)            enumerate; if warm, print the endpoint map\n"
         "  --list               dump all USB devices\n"
         "  --probe-open         sweep all alts/endpoints with the open packet\n"
-        "  --load-firmware HEX  download firmware to a cold device  [gated]\n"
+        "  --load-firmware PAKFW  replay a captured firmware load to a cold device\n"
+        "  --load-firmware-hex STAGE1 MAIN  load from Intel HEX, no capture\n"
+        "                       (firmware/PknLdr.hex firmware/Pakon7.hex)\n"
         "  --raw HEX            send hex bytes (e.g. 0403100085) on --out\n"
         "  --out 0xNN           OUT endpoint for --raw (required with --raw)\n"
         "  --in 0xNN            IN endpoint to read the reply from (optional)\n"
@@ -299,6 +301,7 @@ int main(int argc, char **argv)
 {
     int want_list = 0, want_probe_open = 0;
     const char *firmware_hex = NULL;
+    const char *fw_stage1 = NULL, *fw_main = NULL;
     const char *raw_hex = NULL;
     int alt = 1, out_ep = -1, in_ep = -1;
     unsigned timeout = 1000;
@@ -311,6 +314,9 @@ int main(int argc, char **argv)
             want_list = 1;
         } else if (!strcmp(argv[i], "--probe-open")) {
             want_probe_open = 1;
+        } else if (!strcmp(argv[i], "--load-firmware-hex") && i + 2 < argc) {
+            fw_stage1 = argv[++i];
+            fw_main = argv[++i];
         } else if (!strcmp(argv[i], "--load-firmware") && i + 1 < argc) {
             firmware_hex = argv[++i];
         } else if (!strcmp(argv[i], "--raw") && i + 1 < argc) {
@@ -347,6 +353,18 @@ int main(int argc, char **argv)
 
     if (want_probe_open) {
         exit_code = do_probe_open(ctx, timeout);
+        pakon_usb_exit(ctx);
+        return exit_code;
+    }
+
+    if (fw_stage1) {
+        r = pakon_usb_load_firmware_hex(ctx, fw_stage1, fw_main);
+        if (r != PAKON_OK) {
+            fprintf(stderr, "load-firmware-hex: %s\n", pakon_result_str(r));
+            exit_code = 1;
+        } else {
+            printf("load-firmware-hex: firmware loaded from HEX, device is warm\n");
+        }
         pakon_usb_exit(ctx);
         return exit_code;
     }

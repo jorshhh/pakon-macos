@@ -59,11 +59,27 @@ from an F-135 load) leaves exactly the OEM `Pakon7.hex` image in RAM
 (verified byte-for-byte, 10355/10355) and brings a real F-135+ up as
 operational `0F05:F135`. The Plus differences live entirely in the PIC
 boards (NL/NM firmware), which keep their own flash and are not loaded over
-USB at power-on. `PknInit.hex` is the common bootstrap stage downloaded
-first (it implements external-RAM writes for the main image). See
-`docs/F135_PLUS_CAPTURES.md`.
+USB at power-on. See `docs/F135_PLUS_CAPTURES.md`.
 
-Loading from the `.hex` instead of the captured `.pakfw` is step 1 of the
-replay-free roadmap in `STATUS.md`. Cross-check the personality read (`0xA9`,
-`wIndex 0`) against the cold USB revision before choosing an image: a wrong
-image once lit a fault LED on another project's unit.
+## Loading from Intel HEX (no capture)
+
+The stage-1 loader the host downloads first is **not** `PknInit.hex`: it is
+an EZ-Loader record table compiled into the OEM loader driver `F235Ldr.sys`
+(checked 2026-10-09: its 360 records are exactly the capture's first 360
+`0xA0` writes, in order; `PknInit.hex` does not match). It implements the
+`0xA3` external-RAM writes and the `0xA9` personality read.
+
+Put the two OEM files here, from your own OEM install (`FX35Driver\`):
+
+```sh
+python3 tools/extract_fx2_loader.py ".../FX35Driver/F235Ldr.sys" firmware/PknLdr.hex
+cp ".../FX35Driver/Pakon7.hex" firmware/
+./build/pakon_probe --load-firmware-hex firmware/PknLdr.hex firmware/Pakon7.hex
+```
+
+`firmware/*.hex` and `firmware/*.sys` are git-ignored: they are OEM
+firmware, do not commit them. `pakon_fw_build` builds the same 1104
+transfers as `resources/f135.pakfw` (`test_fw` checks it when the two files
+are present), and the loader stops before the main image unless the
+personality read (`0xA9`, `wIndex 0`) is `F235_AA07`: a wrong image once lit
+a fault LED on another project's unit.

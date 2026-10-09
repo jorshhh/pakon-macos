@@ -14,6 +14,7 @@
  * Bulk send/recv remain Phase 2.
  */
 #include "pakon_usb.h"
+#include "pakon_fw.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -412,6 +413,98 @@ pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *script_path)
                "waiting for re-enumeration to %04x:%04x",
                n, errs, PAKON_WARM_VID, PAKON_WARM_PID);
 
+    return wait_for_warm(ctx, 5000);
+}
+
+static char *read_text(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    rewind(f);
+    char *b = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (b && fread(b, 1, (size_t)n, f) != (size_t)n) {
+        free(b);
+        b = NULL;
+    }
+    fclose(f);
+    if (b) {
+        b[n] = 0;
+        *len = (size_t)n;
+    }
+    return b;
+}
+
+pakon_result pakon_usb_load_firmware_hex(pakon_ctx *ctx, const char *stage1_path,
+                                         const char *main_path)
+{
+    if (!ctx || !stage1_path || !main_path)
+        return PAKON_ERR_PARAM;
+    size_t l1 = 0, l2 = 0;
+    char *s1 = read_text(stage1_path, &l1), *s2 = read_text(main_path, &l2);
+    pakon_fw_seq seq;
+    pakon_result r;
+    if (!s1 || !s2) {
+        pakon_logf(PAKON_LOG_ERROR, "cannot read '%s' / '%s'", stage1_path, main_path);
+        free(s1);
+        free(s2);
+        return PAKON_ERR_FIRMWARE;
+    }
+    r = pakon_fw_build(s1, l1, s2, l2, &seq);
+    free(s1);
+    free(s2);
+    if (r != PAKON_OK)
+        return r;
+
+    libusb_device_handle *h =
+        libusb_open_device_with_vid_pid(ctx->usb, PAKON_COLD_VID, PAKON_COLD_PID);
+    if (!h) {
+        pakon_logf(PAKON_LOG_ERROR, "cannot open cold device %04x:%04x",
+                   PAKON_COLD_VID, PAKON_COLD_PID);
+        pakon_fw_free(&seq);
+        return PAKON_ERR_NO_DEVICE;
+    }
+    (void)libusb_set_auto_detach_kernel_driver(h, 1);
+    (void)libusb_claim_interface(h, 0);
+
+    unsigned errs = 0;
+    for (size_t i = 0; i < seq.n && r == PAKON_OK; i++) {
+        pakon_fw_xfer *x = &seq.x[i];
+        uint8_t buf[16];
+        memcpy(buf, x->data, sizeof buf);
+        int rc = libusb_control_transfer(h, x->request_type, x->request, x->value,
+                                         x->index, buf, x->length, FX2_TIMEOUT_MS);
+        if (rc < 0) {
+            /* Only the final run (CPUCS = 0) may fail as the device renumerates. */
+            if (i + 2 >= seq.n) {
+                errs++;
+                continue;
+            }
+            pakon_logf(PAKON_LOG_ERROR, "fw xfer %zu req=0x%02x val=0x%04x: %s", i,
+                       x->request, x->value, libusb_strerror((enum libusb_error)rc));
+            r = PAKON_ERR_USB;
+            break;
+        }
+        if (i == seq.personality_at) {
+            pakon_hexdump(PAKON_LOG_INFO, "personality", buf, (size_t)rc);
+            if (rc != 8 || !pakon_fw_personality_is_f135(buf)) {
+                pakon_logf(PAKON_LOG_ERROR, "personality is not F235_AA07 "
+                           "(F-135/F-135+); not loading Pakon7.hex. Power-cycle.");
+                r = PAKON_ERR_FIRMWARE;
+            }
+        }
+    }
+    size_t sent = seq.n;
+    pakon_fw_free(&seq);
+    (void)libusb_release_interface(h, 0);
+    libusb_close(h);
+    if (r != PAKON_OK)
+        return r;
+    pakon_logf(PAKON_LOG_INFO, "sent %zu firmware transfers from HEX (%u late "
+               "USB errors); waiting for %04x:%04x", sent, errs,
+               PAKON_WARM_VID, PAKON_WARM_PID);
     return wait_for_warm(ctx, 5000);
 }
 

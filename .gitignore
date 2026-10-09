@@ -39,3 +39,7 @@ scratch/
 # personal EEPROM archives (test fixtures remain tracked)
 /backups/
 .venv/
+
+# OEM firmware, user-supplied (see firmware/README.md); never commit
+/firmware/*.hex
+/firmware/*.sys
