@@ -46,6 +46,8 @@ from pakon_image import (  # noqa: E402
 )
 import oem_sba  # noqa: E402
 
+from . import eeprom  # noqa: E402
+
 WORK_DIR = Path("/tmp/pakon_web")
 # Row layout is auto-detected per raw (F-135 vs the F-135+ per-resolution
 # strides); PAKON_LINEWIDTH + PAKON_IR_LANE=0/1 override the detection.
@@ -56,18 +58,20 @@ RPD_PROFILE = _REPO / "profiles" / "rpd.pf"
 
 
 def find_eeprom_dir() -> Path | None:
-    """The scanner's EEPROM archive: PAKON_EEPROM_DIR, else the newest archive
-    under backups/eeprom/ (tools/pakon_eeprom.py backup)."""
+    """The scanner's EEPROM archive: PAKON_EEPROM_DIR; else, under
+    backups/eeprom/, the newest archive for the connected scanner's serial
+    (web/eeprom.py reads it automatically); else the newest archive."""
     override = os.environ.get("PAKON_EEPROM_DIR")
     if override:
         p = Path(override).expanduser()
         return p if p.is_dir() else None
-    root = _REPO / "backups" / "eeprom"
-    if not root.is_dir():
-        return None
-    archives = [d for d in root.iterdir()
-                if (d / "eeprom_0x52_sectionA_primary.bin").exists()]
-    return max(archives, key=lambda d: d.stat().st_mtime) if archives else None
+    found = eeprom.archives()
+    serial = eeprom.connected_serial()
+    if serial is not None:
+        mine = [d for d in found if eeprom.archive_serial(d) == serial]
+        if mine:
+            return mine[0]
+    return found[0] if found else None
 
 
 _OEM = {"key": None, "value": None}
