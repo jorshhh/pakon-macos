@@ -33,8 +33,8 @@ as test fixtures: generated command streams must match them byte for byte.
 - **libpakon-main** — independent C++ driver. **No licence: read, never copy.**
 - **pakon-scanning-software** — the OEM Windows install. `TLB.dll` = F-135/F-135+
   engine; `TLA.dll` = F-235 (do not use it for 135-line facts); `TLC.dll` = F-335.
-  Decompiling is for interoperability; never commit OEM binaries or decompiler
-  output.
+  Decompiling is for interoperability. The OEM files the colour pipeline needs
+  are committed under `oem/`; the decompiler workspace stays in `re/`.
 
 ## Golden rules
 

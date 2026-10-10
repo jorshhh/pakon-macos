@@ -193,8 +193,8 @@ inpaint) is a possible future feature; the IR data is captured but discarded.
 
 OEM imaging details come from reverse engineering the original Kodak/Pakon Windows
 software (Ghidra decompilation of `PakonIMAu.dll`/`TLB` (F-135 engine)/`TLA`/`TLC` + inspection of the
-`Config/ColorCorrection/` data) **for interoperability**. The OEM binaries and the
-decompilation output are third-party copyrighted and are **NOT committed** (working
-copies under `pakon-scanning-software/` and `re/`, git-ignored). The Kodak ICC
+`Config/ColorCorrection/` data) **for interoperability**. The OEM files the colour
+pipeline uses (`PakonIMAu.dll` and its SBA data) are committed under `oem/` (see
+`oem/README.md`); the Ghidra workspace stays in `re/` (git-ignored). The Kodak ICC
 profiles + ColNeg data needed to reproduce the inversion are committed under
-`profiles/` for personal/local use only (see `profiles/README.md`).
+`profiles/` (see `profiles/README.md`).

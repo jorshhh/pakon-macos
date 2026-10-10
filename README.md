@@ -116,8 +116,7 @@ available ([Replay mode](#replay-mode)).
 
 **1. Firmware files (once)**
 
-Put the two OEM firmware files in `firmware/` (git-ignored; never commit
-them). From your OEM install's `FX35Driver` folder:
+Put the two OEM firmware files in `firmware/` (git-ignored). From your OEM install's `FX35Driver` folder:
 
 ```sh
 python3 tools/extract_fx2_loader.py ".../FX35Driver/F235Ldr.sys" firmware/PknLdr.hex

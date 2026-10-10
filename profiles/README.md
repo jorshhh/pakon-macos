@@ -2,8 +2,7 @@
 
 Kodak/Pakon colour-correction data extracted from the OEM F-X35 COM SERVER
 install (`Config/ColorCorrection/`), used by `tools/pakon_image.py` to reproduce
-the OEM's image processing. © Eastman Kodak Company — committed here for
-personal/local use only, not for redistribution.
+the OEM's image processing. © Eastman Kodak Company.
 
 ## Used today
 
