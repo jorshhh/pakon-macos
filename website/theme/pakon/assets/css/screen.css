@@ -104,16 +104,8 @@ code { font-family: var(--font-mono); font-size: 0.88em; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
 .brand:hover { color: var(--ink); }
 .brand__logo { max-height: 36px; width: auto; }
-.brand__mark {
-    display: grid; place-items: center;
-    width: 32px; height: 32px;
-    background: var(--yellow);
-    border: 2px solid var(--ink);
-    box-shadow: 3px 3px 0 0 var(--ink);
-    transform: rotate(-3deg);
-    font-family: var(--font-display);
-    font-weight: 700;
-}
+/* the 128 px sprite at half size: one art pixel per device pixel on retina */
+.brand__img { width: 64px; height: auto; image-rendering: pixelated; }
 .brand__name { font-family: var(--font-display); font-weight: 700; font-size: 20px; letter-spacing: 0.12em; text-transform: uppercase; }
 
 .site-nav { display: flex; align-items: center; gap: 22px; font-family: var(--font-mono); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }

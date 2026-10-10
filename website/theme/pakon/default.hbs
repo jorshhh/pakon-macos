@@ -21,7 +21,7 @@
                 {{#if @site.logo}}
                     <img class="brand__logo" src="{{@site.logo}}" alt="{{@site.title}}">
                 {{else}}
-                    <span class="brand__mark" aria-hidden="true">P</span>
+                    <img class="brand__img" src="{{asset "images/logo.png"}}" alt="" width="64" height="57">
                     <span class="brand__name">Pakon<span class="red">F135</span></span>
                 {{/if}}
             </a>

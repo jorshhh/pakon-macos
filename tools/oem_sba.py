@@ -416,18 +416,27 @@ class Sba:
         return self.e.s16(impl + SHIFTS, 3)
 
 
-def roll_shifts(frames, dpi='sba-CN-default.dpi'):
-    """OEM per-frame RPD shifts (n, 3) for a roll of analysis images (12-bit
-    RPD, landscape). With at least `mff` frames: pass 1, FOS over the first
+def roll_shifts(frames, dpi='sba-CN-default.dpi', roll=None):
+    """OEM per-frame RPD shifts (n, 3) for analysis images (12-bit RPD,
+    landscape). `roll` is the whole roll's analysis images, for the roll
+    stage (FOS); it defaults to `frames`. The OEM balances against the roll,
+    not against the frames picked for export: three warm frames on their own
+    come out red. With at least `mff` roll frames: pass 1, FOS over the first
     `maxFramesToFos`, pass 2. With fewer, the OEM would use its scan history,
     which we do not have, so each frame is balanced on its own (FOS off)."""
     s = Sba(dpi)
     mff = s._dpi_short(0x3C)
     max_fos = s._dpi_short(0x3E)
-    if len(frames) < max(mff, 1):
+    roll = frames if roll is None else roll
+    if len(roll) < max(mff, 1):
         return np.array([s.preference(s.pass1(f, fos_on=False)) for f in frames], np.float32)
-    impls = [s.pass1(f) for f in frames]
-    out = s.fos(impls[:max_fos])
+    if roll is frames:
+        impls = [s.pass1(f) for f in frames]
+        roll_impls = impls[:max_fos]
+    else:
+        roll_impls = [s.pass1(f) for f in roll[:max_fos]]
+        impls = [s.pass1(f) for f in frames]
+    out = s.fos(roll_impls)
     return np.array([s.pass2(i, out) for i in impls], np.float32)
 
 
