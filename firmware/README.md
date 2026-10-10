@@ -69,7 +69,9 @@ an EZ-Loader record table compiled into the OEM loader driver `F235Ldr.sys`
 `0xA0` writes, in order; `PknInit.hex` does not match). It implements the
 `0xA3` external-RAM writes and the `0xA9` personality read.
 
-Put the two OEM files here, from your own OEM install (`FX35Driver\`):
+Both files are committed here: `Pakon7.hex` copied as-is from the OEM
+install, and `PknLdr.hex` extracted from its `F235Ldr.sys`. To regenerate them
+from your own OEM install (`FX35Driver\`):
 
 ```sh
 python3 tools/extract_fx2_loader.py ".../FX35Driver/F235Ldr.sys" firmware/PknLdr.hex
@@ -77,9 +79,12 @@ cp ".../FX35Driver/Pakon7.hex" firmware/
 ./build/pakon_probe --load-firmware-hex firmware/PknLdr.hex firmware/Pakon7.hex
 ```
 
-`firmware/*.hex` and `firmware/*.sys` are git-ignored (user-supplied OEM
-firmware). `pakon_fw_build` builds the same 1104
-transfers as `resources/f135.pakfw` (`test_fw` checks it when the two files
-are present), and the loader stops before the main image unless the
+| File         | SHA-256 |
+|--------------|---------|
+| `Pakon7.hex` | `edd840680ef7714c5d93b89c3def5ed6ba3085166bc8e0a6a15a0390bef3f2b4` |
+| `F235Ldr.sys` (source of `PknLdr.hex`, not committed) | `785bd29f37f8e49286be7a9b033e3741825952f5c293e2e143906504838ed2f1` |
+
+`pakon_fw_build` builds the same 1104
+transfers as `resources/f135.pakfw` (`test_fw` checks it), and the loader stops before the main image unless the
 personality read (`0xA9`, `wIndex 0`) is `F235_AA07`: a wrong image once lit
 a fault LED on another project's unit.

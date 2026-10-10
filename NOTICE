@@ -20,9 +20,10 @@ Third-party components
 ----------------------
 
 firmware/
-    The Intel HEX firmware blob is a third-party device-bootstrapping artifact
-    with its own separate terms. It is NOT covered by the AGPL and is not a
-    work of this project. See firmware/README.md for provenance and the legal
+    The Intel HEX firmware files (PknLdr.hex, extracted from the OEM
+    F235Ldr.sys, and Pakon7.hex) are third-party device-bootstrapping
+    artifacts from the OEM Pakon software, with their own separate terms.
+    They are NOT covered by the AGPL and are not a work of this project. See firmware/README.md for provenance and the legal
     note.
 
 libusb-1.0

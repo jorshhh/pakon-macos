@@ -105,7 +105,7 @@ operational scanner (`0F05:F135`). Everything after that goes over the command
 channel.
 
 On the **F-135** every step is built in code from three inputs: the OEM's FX2
-firmware files (yours, from the OEM install), the unit's **EEPROM** (factory
+firmware files (shipped in `firmware/`), the unit's **EEPROM** (factory
 per-unit values, read once and archived), and a **light calibration** measured
 at the start of every scan. Nothing is replayed from a capture.
 
@@ -115,16 +115,10 @@ available ([Replay mode](#replay-mode)).
 
 ### Step-by-step (F-135)
 
-**1. Firmware files (once)**
+**1. Firmware files**
 
-Put the two OEM firmware files in `firmware/` (git-ignored). From your OEM install's `FX35Driver` folder:
-
-```sh
-python3 tools/extract_fx2_loader.py ".../FX35Driver/F235Ldr.sys" firmware/PknLdr.hex
-cp ".../FX35Driver/Pakon7.hex" firmware/
-```
-
-See `firmware/README.md` for where they come from.
+The two OEM firmware files ship in `firmware/` (`PknLdr.hex`, `Pakon7.hex`);
+see `firmware/README.md` for where they come from and how to regenerate them.
 
 **2. Load firmware (every power-on)**
 
@@ -356,8 +350,8 @@ archive:
 **"Motor running — feed the film now"**; feed the strip then. **Eject film**
 runs the transport until the film sensors say the strip is out (or stalled at
 the exit, where it has to be pulled by hand). **Load firmware** uses
-`firmware/PknLdr.hex` + `firmware/Pakon7.hex` when present (see
-`firmware/README.md`), else the captured `f135.pakfw`. Without an EEPROM
+`firmware/PknLdr.hex` + `firmware/Pakon7.hex` (see `firmware/README.md`),
+else the captured `f135.pakfw` if they are missing. Without an EEPROM
 backup, and on the F-135+, scans replay the captured scripts.
 
 ```sh
