@@ -1,0 +1,18 @@
+# Local Ghost for working on the site: http://localhost:2368 (admin at /ghost).
+# The theme is mounted live, so edits to theme/pakon show up on reload.
+services:
+  ghost:
+    image: ghost:6-alpine
+    ports:
+      - "2368:2368"
+    environment:
+      NODE_ENV: development
+      url: http://localhost:2368
+      database__client: sqlite3
+      database__connection__filename: /var/lib/ghost/content/data/ghost.db
+    volumes:
+      - ghost-content:/var/lib/ghost/content
+      - ./theme/pakon:/var/lib/ghost/content/themes/pakon
+
+volumes:
+  ghost-content:

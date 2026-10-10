@@ -1,0 +1,22 @@
+{{!< default}}
+{{!-- Blog index, served at /blog/ (see website/routes.yaml). --}}
+
+<section class="section">
+    <div class="wrap">
+        <header class="page-head">
+            <h1 class="section__title">Blog</h1>
+            <p class="section__lede">Progress notes, scanning tips and what we learn about the Pakon along the way.</p>
+        </header>
+
+        {{#if posts}}
+            <div class="post-feed">
+                {{#foreach posts}}
+                    {{> "post-card"}}
+                {{/foreach}}
+            </div>
+            {{pagination}}
+        {{else}}
+            <p class="empty">No posts yet. Check back soon.</p>
+        {{/if}}
+    </div>
+</section>

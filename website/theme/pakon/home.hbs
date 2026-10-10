@@ -1,0 +1,29 @@
+{{!< default}}
+{{!-- Landing page, served at / (see website/routes.yaml). --}}
+
+<section class="hero">
+    <div class="wrap hero__inner">
+        <div class="hero__copy">
+            <h1 class="hero__title">Your Pakon,<br><span class="red">back in service.</span></h1>
+            <p class="hero__lede">
+                Scan film on your Kodak Pakon F&#8209;135 or F&#8209;135+ from your Mac.
+                No old Windows PC needed.
+            </p>
+            <div class="hero__actions">
+                <a class="btn btn--big" href="{{@custom.download_url}}">Download for Mac</a>
+                <a class="btn btn--ghost btn--big" href="{{@custom.repo_url}}">View on GitHub</a>
+            </div>
+            <p class="hero__meta">{{@custom.version_label}}</p>
+        </div>
+
+        <div class="hero__art" aria-hidden="true">
+            <div class="filmstrip">
+                <div class="filmstrip__frames">
+                    <div class="frame frame--neg"></div>
+                    <div class="frame frame--pos"></div>
+                    <div class="frame frame--neg frame--b"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>

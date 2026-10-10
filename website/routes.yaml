@@ -1,0 +1,15 @@
+# Ghost routes: the landing page at /, the blog at /blog/.
+# Upload in Ghost Admin → Settings → Labs → Routes ("Upload routes file").
+
+routes:
+  /:
+    template: home
+
+collections:
+  /blog/:
+    permalink: /blog/{slug}/
+    template: index
+
+taxonomies:
+  tag: /tag/{slug}/
+  author: /author/{slug}/

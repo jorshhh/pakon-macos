@@ -1,0 +1,59 @@
+{
+  "name": "pakon",
+  "description": "Ghost theme for the pakon site: a minimal Mac download page plus a blog.",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "engines": {
+    "ghost": ">=5.0.0"
+  },
+  "author": {
+    "name": "Jorge Rangel",
+    "email": "jorsh@jor.shj",
+    "url": "https://github.com/jorshhh/pakon-macos"
+  },
+  "keywords": [
+    "ghost-theme"
+  ],
+  "scripts": {
+    "test": "npx --yes gscan@latest .",
+    "zip": "mkdir -p ../../dist && rm -f ../../dist/pakon-theme.zip && zip -r ../../dist/pakon-theme.zip . -x 'node_modules/*' '.DS_Store'"
+  },
+  "config": {
+    "posts_per_page": 12,
+    "card_assets": true,
+    "image_sizes": {
+      "s": {
+        "width": 400
+      },
+      "m": {
+        "width": 800
+      },
+      "l": {
+        "width": 1200
+      },
+      "xl": {
+        "width": 2000
+      }
+    },
+    "custom": {
+      "download_url": {
+        "type": "text",
+        "default": "https://github.com/jorshhh/pakon-macos/releases/latest/download/Pakon.dmg",
+        "group": "homepage",
+        "description": "Direct link to the Mac download (.dmg) on the latest GitHub release."
+      },
+      "repo_url": {
+        "type": "text",
+        "default": "https://github.com/jorshhh/pakon-macos",
+        "description": "GitHub repository, linked from the header and footer."
+      },
+      "version_label": {
+        "type": "text",
+        "default": "Free and open source \u00b7 macOS",
+        "group": "homepage",
+        "description": "Small line under the buttons, e.g. \"Version 1.0 \u00b7 macOS 13 or later\"."
+      }
+    }
+  }
+}
