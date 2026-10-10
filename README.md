@@ -148,6 +148,7 @@ requests) and archives them with CRC results and SHA-256 hashes. Do it once,
 right after a power-on, and keep a copy off the machine: this data exists
 nowhere else. Details in [EEPROM backup](docs/EEPROM_BACKUP.md);
 `tools/pakon_eeprom.py decode DIR` decodes an archive without a scanner.
+The web service does this step by itself (see [Web service](#web-service)).
 
 **4. Scan**
 
@@ -317,8 +318,17 @@ The web service runs on the machine with the scanner plugged in and exposes a
 browser UI for the full workflow: firmware load, scan, eject, and image
 processing. Any device on the local network can then open it.
 
-On an F-135 it uses the code-built path when it finds the unit's EEPROM
-backup (the newest archive under `backups/eeprom/`, or `PAKON_EEPROM_DIR`):
+The service reads the connected scanner's EEPROM by itself: at launch, after
+**Load firmware**, or before a scan or eject, once per USB connection, with the
+same read-only requests as `tools/pakon_eeprom.py backup`. The first time it
+sees a unit it archives the EEPROM as `backups/eeprom/<model>-<serial>-<date>`;
+after that it reuses the archive for that serial and picks it over other
+units' archives. `PAKON_EEPROM_DIR` names an archive instead and turns the
+automatic read off. Keep a copy of the archive off the machine: this data
+exists nowhere else.
+
+On an F-135 it uses the code-built path once it has the unit's EEPROM
+archive:
 **Scan** calibrates first (about a minute, keep the film out), then shows
 **"Motor running — feed the film now"**; feed the strip then. **Eject film**
 runs the transport until the film sensors say the strip is out (or stalled at

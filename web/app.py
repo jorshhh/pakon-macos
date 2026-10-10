@@ -32,6 +32,7 @@ from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import eeprom
 from .decode import (WORK_DIR, PREVIEW_PATH, prescan, export_frames,
                      make_contact_sheet, find_eeprom_dir)
 
@@ -51,7 +52,9 @@ FW_STAGE1  = _FW / "PknLdr.hex"
 FW_MAIN    = _FW / "Pakon7.hex"
 # The unit's EEPROM archive (tools/pakon_eeprom.py backup) is what the
 # replay-free scan and the OEM colour path read their per-unit values from.
-# PAKON_EEPROM_DIR picks one; otherwise the newest under backups/eeprom/.
+# The service reads it from the connected scanner by itself (web/eeprom.py)
+# and archives it under backups/eeprom/ the first time it sees a unit;
+# PAKON_EEPROM_DIR picks an archive instead.
 # The scan script is model-specific (the two models' PICs live at different
 # bus addresses); the model is detected at scan time via pakon_replay --open.
 # PAKON_PAKSCAN overrides the choice with an explicit script path.
@@ -75,6 +78,26 @@ _state: dict = {
 
 def _eeprom_dir() -> Path | None:
     return find_eeprom_dir()
+
+
+async def _eeprom_sync_events():
+    """Read the connected scanner's EEPROM if not done on this connection
+    (web/eeprom.py), yielding a log event when a new archive was made or the
+    read failed. Run only between device operations."""
+    before = eeprom.status()
+    st = await asyncio.to_thread(eeprom.sync)
+    if st["created"] and st["archive"] != before["archive"]:
+        yield {"type": "log",
+               "message": f"EEPROM read from {st['model']} serial {st['serial']}"
+                          f" and archived as backups/eeprom/{st['archive']}"}
+    elif st["error"] and st["error"] != before["error"]:
+        yield {"type": "log", "message": st["error"]}
+
+
+@app.on_event("startup")
+async def _startup_eeprom():
+    # Read a warm scanner's EEPROM at launch, in the background.
+    asyncio.create_task(asyncio.to_thread(eeprom.sync))
 
 
 def _fw_hex_available() -> bool:
@@ -122,6 +145,7 @@ async def api_status():
         "frame_count": len(_state["frames"]),
         "processing": _state["processing"],
         "eeprom": (lambda d: d.name if d else None)(_eeprom_dir()),
+        "eeprom_unit": eeprom.status(),
         "firmware_hex": _fw_hex_available(),
     }
 
@@ -151,6 +175,13 @@ async def _firmware_stream():
         yield _sse({"type": "log", "message": line.decode().rstrip()})
     await proc.wait()
     if proc.returncode == 0:
+        # The scanner re-enumerates as 0f05:f135; read its EEPROM once it does.
+        for _ in range(20):
+            if _scanner_state()[0] == "warm":
+                break
+            await asyncio.sleep(0.5)
+        async for ev in _eeprom_sync_events():
+            yield _sse(ev)
         yield _sse({"type": "done"})
     else:
         yield _sse({"type": "error",
@@ -239,12 +270,14 @@ async def _scan_stream(out_dir: Path):
         return
 
     model = None
-    eeprom = _eeprom_dir()
+    async for ev in _eeprom_sync_events():
+        yield _sse(ev)
+    eeprom_dir = _eeprom_dir()
     if not PAKSCAN_OVERRIDE:
         yield _sse({"type": "log", "message": "Detecting scanner model..."})
         model = await _detect_model()
-    if model == "F-135" and eeprom is not None:
-        async for ev in _scan_code_stream(out_dir, eeprom):
+    if model == "F-135" and eeprom_dir is not None:
+        async for ev in _scan_code_stream(out_dir, eeprom_dir):
             yield ev
         return
     if model == "F-135":
@@ -324,7 +357,7 @@ def _prepare_out(out_dir: Path) -> tuple[Path | None, str | None]:
     return out_path, None
 
 
-async def _scan_code_stream(out_dir: Path, eeprom: Path):
+async def _scan_code_stream(out_dir: Path, eeprom_dir: Path):
     """F-135 scan with nothing replayed: setup, light calibration (open gate,
     keep the film out), motor start, then the operator feeds the film."""
     out_path, err = _prepare_out(out_dir)
@@ -333,11 +366,11 @@ async def _scan_code_stream(out_dir: Path, eeprom: Path):
         return
     yield _sse({"type": "log",
                 "message": f"Model: F-135 — scan built in code (EEPROM "
-                           f"{eeprom.name}). Calibrating: keep the film out "
+                           f"{eeprom_dir.name}). Calibrating: keep the film out "
                            f"until the motor starts."})
     code = 1
     async for ev in _run_streaming(
-            ["--scan-code", "--eeprom-dir", str(eeprom), "--image", str(out_path)],
+            ["--scan-code", "--eeprom-dir", str(eeprom_dir), "--image", str(out_path)],
             out_path, _SCAN_LOG_KEYS):
         if ev["type"] == "exit":
             code = ev["code"]
@@ -363,13 +396,15 @@ async def _eject_stream():
                     "message": "could not detect the scanner model (is it warm?)"})
         return
     if model == "F-135":
-        eeprom = _eeprom_dir()
-        if eeprom is None:
+        async for ev in _eeprom_sync_events():
+            yield _sse(ev)
+        eeprom_dir = _eeprom_dir()
+        if eeprom_dir is None:
             yield _sse({"type": "error",
                         "message": "eject needs an EEPROM archive in "
                                    "backups/eeprom/ (or PAKON_EEPROM_DIR)"})
             return
-        args = ["--eject", "--eeprom-dir", str(eeprom)]
+        args = ["--eject", "--eeprom-dir", str(eeprom_dir)]
         yield _sse({"type": "log", "message": "Running the transport until the "
                     "film sensors say the strip is out (at most 60 s)"})
     else:
