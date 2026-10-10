@@ -2,8 +2,8 @@
  * test_fw — FX2 firmware-load sequence from Intel HEX (no hardware).
  *
  * Always: a synthetic stage 1 and main image give the documented order.
- * When firmware/PknLdr.hex and firmware/Pakon7.hex exist (user-supplied OEM
- * files, see firmware/README.md): the generated sequence must equal the
+ * When firmware/PknLdr.hex and firmware/Pakon7.hex exist (shipped OEM files,
+ * see firmware/README.md): the generated sequence must equal the
  * capture resources/f135.pakfw transfer for transfer.
  * Usage: test_fw REPO_DIR
  */

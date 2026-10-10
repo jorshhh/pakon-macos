@@ -40,6 +40,9 @@ scratch/
 /backups/
 .venv/
 
-# OEM firmware, user-supplied (see firmware/README.md)
-/firmware/*.hex
+# OEM loader driver; only the PknLdr.hex extracted from it is committed
+# (see firmware/README.md)
 /firmware/*.sys
+
+# packaged Ghost theme (npm run zip in website/theme/pakon)
+/website/dist/

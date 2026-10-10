@@ -1,0 +1,20 @@
+{{!< default}}
+
+<section class="section">
+    <div class="wrap">
+        {{#tag}}
+        <header class="page-head">
+            <p class="tag-pill">Tag</p>
+            <h1 class="section__title">{{name}}</h1>
+            {{#if description}}<p class="section__lede">{{description}}</p>{{/if}}
+        </header>
+        {{/tag}}
+
+        <div class="post-feed">
+            {{#foreach posts}}
+                {{> "post-card"}}
+            {{/foreach}}
+        </div>
+        {{pagination}}
+    </div>
+</section>

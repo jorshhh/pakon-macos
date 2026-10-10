@@ -279,9 +279,9 @@ PosMatrix (no inversion), B&W the NegMatrix then grey; `pakon_image.py` has
      venv.
   2. Windows needs a USB driver binding for libusb (WinUSB via Zadig or an
      `.inf`), and the C code has POSIX bits (`nanosleep`, `usleep`) to port.
-  3. OEM firmware (`firmware/*.hex`) and `resources/` captures must not be
-     bundled beyond what the repo already ships; the app should point users
-     at `firmware/README.md` to supply their own.
+  3. The OEM firmware (`firmware/PknLdr.hex`, `firmware/Pakon7.hex`) ships
+     in the repo since October 2026, so the app bundles it; users no longer
+     supply their own.
   4. macOS signing/notarization, or document the Gatekeeper workaround.
 
 - **Digital ICE (IR dust/scratch removal)** in `tools/pakon_image.py` as

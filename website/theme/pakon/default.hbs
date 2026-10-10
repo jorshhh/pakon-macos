@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="{{@site.locale}}">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{meta_title}}</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap">
+    <link rel="stylesheet" href="{{asset "css/screen.css"}}">
+
+    {{ghost_head}}
+</head>
+<body class="{{body_class}}">
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+        <div class="wrap site-header__inner">
+            <a class="brand" href="{{@site.url}}">
+                {{#if @site.logo}}
+                    <img class="brand__logo" src="{{@site.logo}}" alt="{{@site.title}}">
+                {{else}}
+                    <span class="brand__mark" aria-hidden="true">P</span>
+                    <span class="brand__name">Pakon<span class="red">F135</span></span>
+                {{/if}}
+            </a>
+            <nav class="site-nav" aria-label="Main">
+                {{navigation}}
+                <a href="{{@custom.repo_url}}">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <main id="main">
+        {{{body}}}
+    </main>
+
+    <footer class="site-footer">
+        <div class="wrap">
+            <div class="footer-badge">Pakon<span class="red">F135</span></div>
+            <p class="footer-note">
+                An unofficial, independent reimplementation.<br>
+                Not affiliated with or endorsed by Kodak or Pakon.
+            </p>
+            <p class="footer-links">
+                <a href="{{@custom.repo_url}}">GitHub</a>
+                <a href="{{@site.url}}/blog/">Blog</a>
+                {{#if @site.members_enabled}}<a href="#/portal/signup">Get updates</a>{{/if}}
+            </p>
+            {{secondary_navigation}}
+        </div>
+    </footer>
+
+    {{ghost_foot}}
+</body>
+</html>

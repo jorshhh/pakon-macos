@@ -1,0 +1,39 @@
+{{!< default}}
+
+{{#post}}
+<article class="article {{post_class}}">
+    <header class="article__head wrap wrap--text">
+        {{#primary_tag}}<a class="post-card__tag" href="{{url}}">{{name}}</a>{{/primary_tag}}
+        <h1 class="article__title">{{title}}</h1>
+        {{#if custom_excerpt}}<p class="article__excerpt">{{custom_excerpt}}</p>{{/if}}
+        <p class="article__meta">
+            {{#if primary_author}}{{primary_author.name}} · {{/if}}
+            <time datetime="{{date format="YYYY-MM-DD"}}">{{date format="D MMMM YYYY"}}</time> · {{reading_time}}
+        </p>
+    </header>
+
+    {{#if feature_image}}
+        <figure class="article__image wrap">
+            <img
+                srcset="{{img_url feature_image size="m"}} 800w, {{img_url feature_image size="l"}} 1200w, {{img_url feature_image size="xl"}} 2000w"
+                sizes="(max-width: 1200px) 100vw, 1200px"
+                src="{{img_url feature_image size="l"}}"
+                alt="{{#if feature_image_alt}}{{feature_image_alt}}{{else}}{{title}}{{/if}}">
+            {{#if feature_image_caption}}<figcaption>{{feature_image_caption}}</figcaption>{{/if}}
+        </figure>
+    {{/if}}
+
+    <div class="gh-content wrap wrap--text">
+        {{content}}
+    </div>
+
+    {{#if comments}}
+        <div class="wrap wrap--text article__comments">{{comments}}</div>
+    {{/if}}
+
+    <nav class="wrap wrap--text article__nav" aria-label="More posts">
+        {{#prev_post}}<a href="{{url}}">← {{title}}</a>{{/prev_post}}
+        {{#next_post}}<a href="{{url}}">{{title}} →</a>{{/next_post}}
+    </nav>
+</article>
+{{/post}}
