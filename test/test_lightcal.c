@@ -99,6 +99,10 @@ int main(void)
     CHECK(pakon_lc_offset_next(-250, 60000.0) == -255, "offset clamped to -255");
     CHECK(pakon_lc_dark_ok(332) && pakon_lc_dark_ok(268) && !pakon_lc_dark_ok(333),
           "dark window 300 +/- 32");
+    CHECK(pakon_lc_offset_next(-38, 334.0) == -39,
+          "offset: 334 rounds to no step, so step one code down (2026-10-09 stall)");
+    CHECK(pakon_lc_offset_next(-38, 262.0) == -37, "offset: one code up when just under");
+    CHECK(pakon_lc_offset_next(-38, 320.0) == -38, "offset: in the window, no change");
 
     /* Caps and windows. */
     CHECK(!pakon_lc_peak_over_cap(PAKON_LC_G, 64000) &&

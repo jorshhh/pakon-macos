@@ -183,6 +183,12 @@
     .msg { font-size: 0.83rem; font-family: 'IBM Plex Mono', monospace; font-weight: 600; color: var(--muted); }
     .msg.ok  { color: var(--green); }
     .msg.err { color: var(--red); }
+    .feed-prompt {
+      margin-top: 14px; padding: 12px; display: none;
+      border: 2px solid var(--green); color: var(--green);
+      font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 1rem;
+    }
+    .feed-prompt.show { display: block; }
 
     .file-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .file-name {
@@ -367,12 +373,16 @@
   </div>
   <div class="row">
     <button id="scan-btn">Scan</button>
+    <button class="ghost" id="eject-btn">Eject film</button>
     <span class="msg" id="scan-msg"></span>
   </div>
+  <div class="msg" id="scan-mode" style="margin-top: 8px;"></div>
+  <div class="feed-prompt" id="feed-prompt"></div>
   <div class="progress-wrap" id="scan-prog-wrap">
-    <progress id="scan-prog" max="1300"></progress>
+    <progress id="scan-prog" max="2200"></progress>
     <div class="progress-label" id="scan-prog-label"></div>
   </div>
+  <div class="log-box" id="scan-log"></div>
 </div>
 
 <!-- Process (always) -->
@@ -530,6 +540,10 @@
       $('fw-card').classList.toggle('hidden', d.state !== 'cold');
       $('scan-card').classList.toggle('hidden', d.state !== 'warm');
 
+      $('scan-mode').textContent = d.eeprom
+        ? `F-135: scan built in code (EEPROM ${d.eeprom}); F-135+: replayed script`
+        : 'No EEPROM archive in backups/eeprom/ — scans are replayed';
+
       // Seed the output folder from the server default once.
       if (!outDirInit && d.out_dir) {
         outDirInit = true;
@@ -579,16 +593,32 @@
   });
 
   // ── Scan ─────────────────────────────────────────────────────────────────
+  function logLine(id, text) {
+    const el = $(id);
+    el.classList.add('show');
+    el.textContent += (el.textContent ? '\n' : '') + text;
+    el.scrollTop = el.scrollHeight;
+  }
+
   $('scan-btn').addEventListener('click', async () => {
     const btn = $('scan-btn');
     btn.disabled = true;
+    $('eject-btn').disabled = true;
     setMsg($('scan-msg'), 'Starting…');
     $('scan-prog-wrap').classList.add('show');
     $('scan-prog').value = 0;
+    $('scan-log').textContent = '';
+    $('feed-prompt').classList.remove('show');
     hasScanFile = false;
 
     await postSSE('/api/scan', { out_dir: outDir }, ev => {
-      if (ev.type === 'progress') {
+      if (ev.type === 'log') {
+        logLine('scan-log', ev.message);
+      } else if (ev.type === 'feed') {
+        $('feed-prompt').textContent = ev.message;
+        $('feed-prompt').classList.add('show');
+        logLine('scan-log', ev.message);
+      } else if (ev.type === 'progress') {
         $('scan-prog').value = ev.mb;
         $('scan-prog-label').textContent = `${ev.mb} MB received`;
         $('scan-msg').textContent = '';
@@ -605,7 +635,32 @@
       }
     });
 
+    $('feed-prompt').classList.remove('show');
     btn.disabled = false;
+    $('eject-btn').disabled = false;
+  });
+
+  // ── Eject ────────────────────────────────────────────────────────────────
+  $('eject-btn').addEventListener('click', async () => {
+    const btn = $('eject-btn');
+    btn.disabled = true;
+    $('scan-btn').disabled = true;
+    setMsg($('scan-msg'), 'Ejecting…');
+    $('scan-log').textContent = '';
+    await postSSE('/api/eject', {}, ev => {
+      if (ev.type === 'log') {
+        logLine('scan-log', ev.message);
+        if (ev.message.startsWith('eject:'))
+          setMsg($('scan-msg'), ev.message.slice(7), 'ok');
+      } else if (ev.type === 'done') {
+        if ($('scan-msg').textContent === 'Ejecting…')
+          setMsg($('scan-msg'), 'Transport stopped', 'ok');
+      } else if (ev.type === 'error') {
+        setMsg($('scan-msg'), ev.message, 'err');
+      }
+    });
+    btn.disabled = false;
+    $('scan-btn').disabled = false;
   });
 
   // ── Output folder picker ───────────────────────────────────────────────────

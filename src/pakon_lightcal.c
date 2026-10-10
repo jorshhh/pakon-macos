@@ -97,6 +97,10 @@ const double pakon_lc_density_c41[PAKON_LC_NCH] = { 0.144, 0.40, 0.715, 0.0 };
 int pakon_lc_offset_next(int offset, double black_mean)
 {
     int next = offset + (int)lround((black_mean - PAKON_LC_DARK_TARGET) * -0.0133929);
+    /* Outside the window but less than half a code off: the rounded step is
+     * 0 and the loop would never move. Step one code toward the target. */
+    if (next == offset && !pakon_lc_dark_ok(black_mean))
+        next += black_mean > PAKON_LC_DARK_TARGET ? -1 : 1;
     return next < -255 ? -255 : next > 255 ? 255 : next;
 }
 

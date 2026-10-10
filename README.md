@@ -14,9 +14,13 @@ interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 > that wraps the C tools and image pipeline so any machine on the local network
 > can drive the scanner.
 >
-> Today the scan itself is driven by **replaying captured OEM command
-> sequences** (`resources/*.pakscan`, `f135.pakfw`). The current goal is a
-> **replay-free client** that builds every command in code; see `STATUS.md`
+> On the **F-135** every step is now **built in code**, nothing replayed:
+> firmware from the OEM Intel HEX files, setup, light calibration, scan,
+> teardown, film advance and sensor-driven eject (`--load-firmware-hex`,
+> `--scan-code`, `--eject`), and the web UI uses that path. It needs the
+> unit's EEPROM backup (`tools/pakon_eeprom.py backup`). Verified on one
+> F-135 (serial 3054) on macOS, October 2026. The **F-135+** still replays
+> captured OEM sequences (`resources/f135plus/*.pakscan`). See `STATUS.md`
 > for the roadmap.
 >
 > The decoder marker-aligns each row, registers the trilinear R/G/B lines,
@@ -48,9 +52,20 @@ The hardware driver is two strictly separated C layers:
   primitive. No USB knowledge.
 
 `pakon_log` is a shared utility (tracing + the common `pakon_result` type) used
-by both layers without coupling them to each other. On top of the driver, the
-Python web service (`web/`) drives the C tools and runs the image pipeline
-(`tools/pakon_image.py`) to serve the browser UI.
+by both layers without coupling them to each other. Built on them:
+
+- **`pakon_cmd`**: the one place that uses both layers: sends frames and
+  generated sequences with the OEM reply rules and busy poll, and runs the
+  event service.
+- **`pakon_setup`**: builds the command sequences in code (controller init,
+  per-mode configure, calibration writes, scan start, teardown, motor,
+  event follow-ups), checked byte for byte against the captures.
+- **`pakon_lightcal`**: line statistics and the light-calibration steps.
+- **`pakon_eeprom`**: per-unit EEPROM decoder. **`pakon_fw`**: FX2
+  firmware-load sequence from Intel HEX.
+
+On top of the driver, the Python web service (`web/`) drives the C tools and
+runs the image pipeline (`tools/pakon_image.py`) to serve the browser UI.
 
 ## Building
 
@@ -74,107 +89,115 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Produces: static `libpakon`, tools `pakon_probe` and `pakon_replay`, and unit
-tests `test_proto` / `test_hex` / `test_calib`. When CMake finds Python 3, ctest
-also runs the offline EEPROM tests (`test_eeprom`, standard library only).
+Produces: static `libpakon`, tools `pakon_probe` and `pakon_replay`, and the
+hardware-free unit tests (`test_proto`, `test_hex`, `test_calib`,
+`test_eeprom_c`, `test_setup`, `test_lightcal`, `test_fw`). When CMake finds
+Python 3, ctest also runs the offline EEPROM tests (`test_eeprom`).
 
 ## Usage
 
-### EEPROM backup and offline decoding
-
-`python3 tools/pakon_eeprom.py decode DIRECTORY` validates and decodes archived
-EEPROM sections without a scanner. `backup NEW_DIRECTORY` reads all four
-primary/backup sections from an already-warm F-135/F-135+, preserving raw files,
-CRC results, decoded fields, and SHA-256 hashes. The new reader is offline-tested;
-hardware validation is pending. See [EEPROM backup](docs/EEPROM_BACKUP.md) before
-using its hardware mode. It does not load firmware or write EEPROM.
-
 ### Overview
 
-The scanner has two firmware stages. On power-on it enumerates as a bare FX2
-bootloader (`0F05:F235`). The working driver downloads a second-stage firmware
-image over USB, after which the device re-enumerates as the operational scanner
-(`0F05:F135`). Our tools replicate this sequence.
+On power-on the scanner enumerates as a bare FX2 bootloader (`0F05:F235`). The
+host downloads the FX2 firmware, after which it re-enumerates as the
+operational scanner (`0F05:F135`). Everything after that goes over the command
+channel.
 
-Two file types drive the process:
+On the **F-135** every step is built in code from three inputs: the OEM's FX2
+firmware files (yours, from the OEM install), the unit's **EEPROM** (factory
+per-unit values, read once and archived), and a **light calibration** measured
+at the start of every scan. Nothing is replayed from a capture.
 
-- **`.pakfw`** — a firmware replay script extracted from a USB capture of the
-  Windows driver performing the firmware load. It contains the exact sequence
-  of USB control transfers needed to bring the scanner from cold (`0F05:F235`)
-  to operational (`0F05:F135`). One ships at `resources/f135.pakfw` (works
-  for the F-135 and F-135+ — same FX2 image); regenerate from your own
-  capture with `analyze_capture.py --extract-firmware` if redistribution is
-  a concern — see `firmware/README.md`.
+The **F-135+** still replays captured OEM sequences (`.pakscan` scripts, see
+[F-135+ owners](#f-135-owners)); so does the F-135 when no EEPROM backup is
+available ([Replay mode](#replay-mode)).
 
-- **`.pakscan`** — an operation script extracted from a USB capture of the
-  Windows driver. Two kinds:
-  - **Scan script** — ordered sequence of commands, control transfers, and
-    image reads. `pakon_replay --scan` replays it verbatim to drive a real
-    scan. Generate with `analyze_capture.py --extract-scan`.
-  - **Advance script** — motor command sequence for film transport.
-    `pakon_replay resources/advance.pakscan` replays it and then loops the
-    start/poll/finalize sequence for as many frames as needed. Generate by
-    capturing an advance operation and extracting with `analyze_capture.py`.
+### Step-by-step (F-135)
 
-### Step-by-step
+**1. Firmware files (once)**
 
-**1. List devices**
+Put the two OEM firmware files in `firmware/` (git-ignored; never commit
+them). From your OEM install's `FX35Driver` folder:
 
 ```sh
-./build/pakon_probe --list
+python3 tools/extract_fx2_loader.py ".../FX35Driver/F235Ldr.sys" firmware/PknLdr.hex
+cp ".../FX35Driver/Pakon7.hex" firmware/
 ```
 
-With the scanner plugged in you should see `0f05:f235` (cold/bootstrap). If
-the device is already warm (`0f05:f135`) from a previous session, skip step 2.
+See `firmware/README.md` for where they come from.
 
-**2. Load firmware**
+**2. Load firmware (every power-on)**
 
 ```sh
-# Linux (needs privileges for libusb)
-sudo ./build/pakon_probe --load-firmware resources/f135.pakfw
-
-# macOS (no sudo needed)
-./build/pakon_probe --load-firmware resources/f135.pakfw
+./build/pakon_probe --list     # 0f05:f235 = cold, needs firmware; 0f05:f135 = ready
+./build/pakon_probe --load-firmware-hex firmware/PknLdr.hex firmware/Pakon7.hex
 ```
 
-The scanner re-enumerates as `0f05:f135`. Confirm with `--list`.
+The loader refuses to continue unless the scanner reports the F-135/F-135+
+personality. Linux needs `sudo` (or a udev rule) for libusb; macOS does not.
 
-**3. Verify the open handshake**
+**3. Back up the EEPROM (once)**
 
 ```sh
-./build/pakon_replay --open
+python3 -m venv .venv && .venv/bin/pip install pyusb
+mkdir -p backups/eeprom
+.venv/bin/python tools/pakon_eeprom.py backup backups/eeprom/F135-SERIAL
 ```
 
-Should print `OK` for each step and reach `Idle`.
+Reads all four copies of the per-unit EEPROM (read-only, the OEM's own read
+requests) and archives them with CRC results and SHA-256 hashes. Do it once,
+right after a power-on, and keep a copy off the machine: this data exists
+nowhere else. Details in [EEPROM backup](docs/EEPROM_BACKUP.md);
+`tools/pakon_eeprom.py decode DIR` decodes an archive without a scanner.
 
-**4. Advance film**
-
-To transport film to the desired position (e.g. to the first frame):
+**4. Scan**
 
 ```sh
-./build/pakon_replay resources/advance.pakscan            # advance 1 frame
-./build/pakon_replay resources/advance.pakscan --steps N  # advance N frames
+./build/pakon_replay --scan-code --eeprom-dir backups/eeprom/F135-SERIAL --image scan.raw
 ```
 
-Each step sends the start command, polls until the scanner signals the frame
-is in position, then sends the finalize command. `--limit SEC` sets a
-wall-clock safety cap (default 60 s). The advance duration (how far each step
-moves the film) is a 24-bit value written to PICM register `0x02` (set by the
-TLX software in seconds) and is carried verbatim in the `.pakscan` script — see
-`docs/PROTOCOL.md`.
+Runs setup, the light calibration (about a minute: **keep the film out**, it
+measures the open gate), then starts the motor and prints
+`motor start (a0) sent -- feed the film now`. **Feed the strip then.** The
+scan stops on its own once the open gate follows the film, and the teardown
+stops the motor. Base 16 with the IR channel; about 240 MB per 4-frame strip,
+up to ~2 GB for a 36-exposure roll (`--max-mb`, default 4096, is only a
+runaway guard).
 
-**5. Run a scan**
-
-Load film into the scanner, then:
+**5. Eject the strip**
 
 ```sh
-./build/pakon_replay --scan resources/scan.pakscan --image scan.raw
+./build/pakon_replay --eject --eeprom-dir backups/eeprom/F135-SERIAL
 ```
 
-Streams ~240 MB per 4-frame strip, or ~1.2 GB for a whole roll. A couple of
-transfer errors at the very end are normal.
+Runs the transport until the DX film sensors say the strip is out, or that it
+has stalled at the exit (the tail has left the drive rollers: pull it out by
+hand). Waits up to 15 s for film, at most 60 s in all.
+`--advance-code SECONDS` runs the transport for a fixed time instead.
 
-**6. Decode the image**
+Other code-built tools: `--setup [--teardown]` (setup only), `--light-cal`
+(calibration only, open gate), `--calib-probe` (static dark/lit levels),
+`--film-sense SECONDS` (log the DX sensor levels while the transport runs).
+All take `--eeprom-dir`.
+
+### Replay mode
+
+The original path, still used on the F-135+ and as the F-135 fallback:
+replaying sequences extracted from USB captures of the OEM driver.
+
+- **`.pakfw`**: the firmware load as captured (`resources/f135.pakfw`, same
+  FX2 image for both models):
+  `./build/pakon_probe --load-firmware resources/f135.pakfw`.
+- **`.pakscan`**: a scan or advance as captured.
+  `./build/pakon_replay --scan resources/scan.pakscan --image scan.raw`
+  replays an F-135 scan verbatim (insert the film first; `--autostop` stops at
+  the end of the film); `./build/pakon_replay resources/advance.pakscan
+  --steps N` replays the advance. Generate your own with
+  `tools/analyze_capture.py`.
+- `./build/pakon_replay --open` replays the open handshake and prints the
+  detected model.
+
+### Decode the image
 
 **Option A — web UI (recommended):** start the web service (see below) and
 open `http://localhost:8000`. Upload the `.raw`, click **Process** (prescan →
@@ -222,7 +245,7 @@ Key decoder options:
 | `--frames N` | auto | optional hard override of the auto-detected count |
 | `--channel-order {fixed,auto,brg}` | fixed | R/G/B identity after marker alignment (fixed is verified) |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
-| `--autocrop` / `--no-autocrop` | on | strip leader / blank pre-load scan / gate margin |
+| `--autocrop` / `--no-autocrop` | on | strip leader / blank pre-load scan / gate margin; dense negatives (frames under ~6% of full scale) can be cut as leader, use `--no-autocrop` |
 | `-o PREFIX` | `frame` | output filename prefix |
 
 ### F-135+ owners
@@ -292,8 +315,18 @@ sudo PAKON_DEBUG=3 ./build/pakon_probe
 ## Web service
 
 The web service runs on the machine with the scanner plugged in and exposes a
-browser UI for the full workflow: firmware load, scan, and image processing.
-Any device on the local network can then open it.
+browser UI for the full workflow: firmware load, scan, eject, and image
+processing. Any device on the local network can then open it.
+
+On an F-135 it uses the code-built path when it finds the unit's EEPROM
+backup (the newest archive under `backups/eeprom/`, or `PAKON_EEPROM_DIR`):
+**Scan** calibrates first (about a minute, keep the film out), then shows
+**"Motor running — feed the film now"**; feed the strip then. **Eject film**
+runs the transport until the film sensors say the strip is out (or stalled at
+the exit, where it has to be pulled by hand). **Load firmware** uses
+`firmware/PknLdr.hex` + `firmware/Pakon7.hex` when present (see
+`firmware/README.md`), else the captured `f135.pakfw`. Without an EEPROM
+backup, and on the F-135+, scans replay the captured scripts.
 
 ```sh
 python3 -m pip install -r web/requirements.txt
@@ -319,9 +352,11 @@ the rendered JPEGs.
 
 ## Firmware
 
-See `firmware/README.md` for provenance and the legal note. The `.pakfw` route
-(replay from capture) is the practical path for the F-135; the Intel HEX
-(`.hex`) route remains available for clean redistribution.
+See `firmware/README.md` for provenance and the legal note. Loading from the
+OEM Intel HEX files (`pakon_probe --load-firmware-hex firmware/PknLdr.hex
+firmware/Pakon7.hex`) is verified on the F-135; the stage-1 loader comes from
+the OEM `F235Ldr.sys` via `tools/extract_fx2_loader.py`. The captured `.pakfw`
+replay remains as a fallback.
 
 ## License
 

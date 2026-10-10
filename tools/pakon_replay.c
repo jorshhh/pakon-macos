@@ -2281,7 +2281,8 @@ static void usage(const char *argv0)
         "                capture and any shorter film just stops earlier\n"
         "  --trace-status  with --scan: log live poll/kick replies + status, with\n"
         "                  the current image-read index (to learn the cadence)\n"
-        "  --max-mb N    --scan-sm safety cap on image bytes (default 512, 0=off)\n"
+        "  --max-mb N    --scan-sm/--scan-code safety cap on image MB (default 4096,\n"
+        "                0=off); a full 36-exposure roll is up to ~2 GB\n"
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
@@ -2291,6 +2292,10 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
+    /* Line-buffered even into a pipe: the web client reads progress (e.g. the
+     * "feed the film now" prompt) as it happens. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     int want_open = 0, drain = 0, trace_status = 0, autostop = 0;
     int want_advance_run = 0;       /* --advance: standalone or after --scan */
     unsigned advance_seconds = 15;
@@ -2311,7 +2316,8 @@ int main(int argc, char **argv)
     unsigned timeout = 1000;
     unsigned limit_sec = 60;
     unsigned long steps_count = 1;
-    unsigned long max_mb = 512;
+    /* Runaway guard only: a 36-exposure roll at Base 16 + IR is up to ~2 GB. */
+    unsigned long max_mb = 4096;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
