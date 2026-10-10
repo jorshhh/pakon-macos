@@ -27,8 +27,8 @@ frame_*.png
 __pycache__/
 *.pyc
 
-# third-party OEM software + reverse-engineering workspace (copyrighted; not ours
-# to redistribute). Findings are folded into docs/PROTOCOL.md instead.
+# full OEM install + reverse-engineering workspace (the files the pipeline needs
+# are committed under oem/)
 /pakon-scanning-software/
 /re/
 
@@ -40,6 +40,6 @@ scratch/
 /backups/
 .venv/
 
-# OEM firmware, user-supplied (see firmware/README.md); never commit
+# OEM firmware, user-supplied (see firmware/README.md)
 /firmware/*.hex
 /firmware/*.sys

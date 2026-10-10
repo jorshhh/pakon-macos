@@ -60,7 +60,36 @@ oversaturated the colour. Pillow's colour management is 8-bit, so `rpd.pf` is
 sampled into a 52³ table on exact 8-bit nodes and applied trilinearly to keep
 16-bit precision.
 
+**OEM scene balance, `tools/oem_sba.py` (2026-10-09):** the web export runs the
+OEM's own Ansel balance from `oem/PakonIMAu.dll` under emulation (Unicorn,
+32-bit x86) and adds each frame's shift to its RPD before `rpd.pf`. The balance
+code is plain C, so it runs as-is with the structures the OEM C++ wrapper
+(`AnsSbaCapabilityImpl`) would build:
+
+| Step | Function | Inputs |
+|---|---|---|
+| decode the SBA tables | `SbaDecodePcode` `0x102884b0` | `oem/ansel/sba/Pcode/pcode-dls_1.7` |
+| hue weighting table | `Makesfs` `0x102ac820` (rows, out) | `Sfs/sfsTable35`; out = object +0x2c |
+| per frame: 24×36 grid | `createAlgData` `0x1028ceb0` | planar 16-bit RPD image, `minDmin` aim |
+| per frame: pass 1 | `Sba()` `0x1028b8d0`, mode 1 | DPI block (FUN_10214e30), command switches |
+| roll: FOS | `SbaCalcFosResults` `0x1028f570` | first `maxFramesToFos` frames, reference `fpo` |
+| per frame: pass 2 | `Sba()` mode 2, then `Preference()` `0x1028c780` | frame Dmin lowered to the roll `fosDmin` |
+
+The result is the shift at object +0x3a38 (`getShifts`), R/G/B in RPD codes. FOS
+is Kodak's film-order analysis: the roll's film base is each channel's lowest
+frame Dmin, and the near-neutral samples of all frames give the film's grey axis
+(a closed-form 3×3 eigen solve in the opponent axes N = (R+G+B)/√3,
+GM = (2G−R−B)/√6, ILL = (B−R)/√2). The shift both balances colour and sets each
+frame's density, which the roll balance below never did. Parameters are
+`sba-CN-default.dpi`; the command switches are the constructor's no-metadata
+defaults. With fewer than `mff` (4) frames the OEM falls back to scan history,
+which we lack, so each frame is balanced alone (`Sba()` mode 0). Not yet
+modelled: SCPLut (configured on, applied before SBA), DX-code DPI selection,
+the OEM's analysis image size (ours: 192×128, area-averaged in raw space). Not
+checked against OEM output. `PAKON_OEM_SBA=0` turns it off.
+
 **Roll balance (stand-in for the OEM's Ansel roll balance), `oem_roll_balance`:**
+the fallback when the emulator (`unicorn`, `pefile`) or `oem/` is missing.
 without it the output leans blue. Per channel, in RPD: the film base stays put
 and the roll's picture median moves half way to neutral (a per-channel affine,
 like Ansel's SCP stage); measured once per roll, applied to every frame
@@ -193,8 +222,8 @@ inpaint) is a possible future feature; the IR data is captured but discarded.
 
 OEM imaging details come from reverse engineering the original Kodak/Pakon Windows
 software (Ghidra decompilation of `PakonIMAu.dll`/`TLB` (F-135 engine)/`TLA`/`TLC` + inspection of the
-`Config/ColorCorrection/` data) **for interoperability**. The OEM binaries and the
-decompilation output are third-party copyrighted and are **NOT committed** (working
-copies under `pakon-scanning-software/` and `re/`, git-ignored). The Kodak ICC
+`Config/ColorCorrection/` data) **for interoperability**. The OEM files the colour
+pipeline uses (`PakonIMAu.dll` and its SBA data) are committed under `oem/` (see
+`oem/README.md`); the Ghidra workspace stays in `re/` (git-ignored). The Kodak ICC
 profiles + ColNeg data needed to reproduce the inversion are committed under
-`profiles/` for personal/local use only (see `profiles/README.md`).
+`profiles/` (see `profiles/README.md`).

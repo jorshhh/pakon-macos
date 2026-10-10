@@ -7,3 +7,6 @@ numpy>=1.24.0
 tifffile>=2023.1.1
 Pillow>=9.0.0
 pyusb>=1.2.1
+# OEM scene balance: runs oem/PakonIMAu.dll's SBA code (tools/oem_sba.py)
+unicorn>=2.0.0
+pefile>=2023.2.7

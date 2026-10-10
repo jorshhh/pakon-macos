@@ -6,9 +6,34 @@ reasoning. Status: **decided**, **deferred** (revisit later), or **superseded**.
 
 ---
 
+## 2026-10-09 — Ansel scene balance: run the OEM code under emulation
+
+**Status:** decided. Supersedes the deferral below.
+
+**Context.** A roll whose film base was off-nominal (red ~0.15 density low)
+came out strongly blue: the NegMatrix offsets push blue up by ~500 RPD codes
+and `rpd.pf` is neutral on equal RPD, so the roll balance alone could not
+recover it, while a fix tuned on that roll turned another roll cream.
+
+**Decision.** Run the OEM balance itself: `oem/PakonIMAu.dll`'s plain-C SBA,
+FOS and Preference functions under Unicorn (`tools/oem_sba.py`), wired into
+the web export with the roll balance as fallback. The needed OEM files are
+committed under `oem/`.
+
+**Why not the other options.** Wine (option A below) needs a 32-bit Windows
+runtime and the DLL's undocumented C++ interface; emulating only the C core
+needs neither. A Python port (option B) is still possible and can now be
+verified bit for bit against the emulator.
+
+**Result.** By eye on two rolls (serial 3054): the blue roll comes out
+neutral with natural skin and whites; the gold roll keeps its colour and gains
+per-frame exposure. No OEM reference yet.
+
+---
+
 ## 2026-10-09 — Ansel scene balance: deferred, reimplement rather than run the DLL
 
-**Status:** deferred.
+**Status:** superseded (above).
 
 **Context.** The OEM colour engine (`PakonIMAu.dll`) is built on Kodak's
 Ansel library: ~48 stages driven by 333 data files (`docs/IMAGING.md`, "The

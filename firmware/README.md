@@ -77,8 +77,8 @@ cp ".../FX35Driver/Pakon7.hex" firmware/
 ./build/pakon_probe --load-firmware-hex firmware/PknLdr.hex firmware/Pakon7.hex
 ```
 
-`firmware/*.hex` and `firmware/*.sys` are git-ignored: they are OEM
-firmware, do not commit them. `pakon_fw_build` builds the same 1104
+`firmware/*.hex` and `firmware/*.sys` are git-ignored (user-supplied OEM
+firmware). `pakon_fw_build` builds the same 1104
 transfers as `resources/f135.pakfw` (`test_fw` checks it when the two files
 are present), and the loader stops before the main image unless the
 personality read (`0xA9`, `wIndex 0`) is `F235_AA07`: a wrong image once lit

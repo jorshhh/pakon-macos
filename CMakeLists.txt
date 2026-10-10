@@ -82,6 +82,9 @@ if(Python3_Interpreter_FOUND)
   # Skips itself when numpy/Pillow are missing from that interpreter.
   add_test(NAME test_image_colour
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_image_colour.py)
+  # Skips itself when numpy/unicorn/pefile are missing.
+  add_test(NAME test_oem_sba
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_oem_sba.py)
 else()
   message(STATUS "Python3 not found: offline EEPROM tests are unavailable")
 endif()
