@@ -20,10 +20,11 @@ interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 > `--scan-code`, `--eject`), and the web UI uses that path. It needs the
 > unit's EEPROM backup (`tools/pakon_eeprom.py backup`). Verified on one
 > F-135 (serial 3054) on macOS, October 2026. The **F-135+** still replays
-> captured OEM sequences (`resources/f135plus/*.pakscan`). See `STATUS.md`
-> for the roadmap.
+> captured OEM sequences (`resources/f135plus/*.pakscan`). See
+> [Roadmap](#roadmap) for what's next.
 >
 > The decoder marker-aligns each row, registers the trilinear R/G/B lines,
+> applies the OEM's per-column flat field from the light calibration,
 > autocrops, and detects frames by autocorrelation. It also reproduces the OEM colour:
 > the recovered **C-41 inversion** (a log-density ColNeg LUT) for a faithful
 > positive, and the Kodak **`rpd.pf`** rendering profile for the vibrant JPEG
@@ -161,7 +162,9 @@ measures the open gate), then starts the motor and prints
 scan stops on its own once the open gate follows the film, and the teardown
 stops the motor. Base 16 with the IR channel; about 240 MB per 4-frame strip,
 up to ~2 GB for a 36-exposure roll (`--max-mb`, default 4096, is only a
-runaway guard).
+runaway guard). The calibration's per-column tables are saved next to the
+raw as `scan.raw.flat.json`; the decoder picks them up (see
+[Flat field](#flat-field)).
 
 **5. Eject the strip**
 
@@ -175,7 +178,8 @@ hand). Waits up to 15 s for film, at most 60 s in all.
 `--advance-code SECONDS` runs the transport for a fixed time instead.
 
 Other code-built tools: `--setup [--teardown]` (setup only), `--light-cal`
-(calibration only, open gate), `--calib-probe` (static dark/lit levels),
+(calibration only, open gate; writes the flat field to
+`DIR/flatfield.json`, or `--flat-out FILE`), `--calib-probe` (static dark/lit levels),
 `--film-sense SECONDS` (log the DX sensor levels while the transport runs).
 All take `--eeprom-dir`.
 
@@ -227,6 +231,8 @@ as 37+ usable frames). The decoder automatically handles:
   inversion (Negative Lab Pro, darktable negadoctor, …).
 - **Rendered JPEG** (`--jpeg`) — the Kodak `rpd.pf` ICC profile + scene balance +
   a highlight roll-off that keeps detail the OEM blows out. See `docs/IMAGING.md`.
+- **Flat field** — the per-column dark and gain correction from the light
+  calibration (see [Flat field](#flat-field)).
 - **IR (Digital ICE) block** — the trailing IR samples of each row are dropped
   (we do **not** do scratch removal — see `docs/IMAGING.md`).
 - **Marker-bit row alignment** (fixes the R,G,B phase per scan) and **trilinear
@@ -243,9 +249,26 @@ Key decoder options:
 | `--rotate {90,180,270}` | 0 | rotate each output frame |
 | `--frames N` | auto | optional hard override of the auto-detected count |
 | `--channel-order {fixed,auto,brg}` | fixed | R/G/B identity after marker alignment (fixed is verified) |
+| `--flat FILE` / `--no-flat` | auto | per-column flat field; default `RAW.flat.json`, else `EEPROM_DIR/flatfield.json` |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
 | `--autocrop` / `--no-autocrop` | on | strip leader / blank pre-load scan / gate margin; dense negatives (frames under ~6% of full scale) can be cut as leader, use `--no-autocrop` |
 | `-o PREFIX` | `frame` | output filename prefix |
+
+### Flat field
+
+The F-135's illumination falls off toward the ends of the sensor line: on
+serial 3054 a column at the edge gets about a quarter of the light that the
+centre gets. Uncorrected, this shows as a bright band along one edge of every
+frame (the bottom, after the export's rotation). Like the OEM's `TLB.dll`, the
+light calibration measures each column dark and through the empty gate, and
+the decoder applies `(raw − dark) · 64000 / (open gate − dark)` per column.
+
+- `--scan-code` saves the tables with each scan (`scan.raw.flat.json`).
+- `--light-cal --eeprom-dir DIR` (gate empty) saves `DIR/flatfield.json`,
+  which the decoder and the web app use for any raw without its own file, so
+  older scans are corrected too.
+- Turn it off with `--no-flat` (CLI) or `PAKON_FLAT=0` (web). F-135 Base 16
+  only for now; a table that doesn't match the scan's width is skipped.
 
 ### F-135+ owners
 
@@ -347,10 +370,29 @@ flow**:
    `pefile` from `web/requirements.txt`). Download per-frame raw negative / TIFF /
    JPEG, a zip of any format, or a JPEG contact sheet.
 
+Processing applies the [flat field](#flat-field) automatically when one is
+found (the scan's own, else the EEPROM archive's `flatfield.json`);
+`PAKON_FLAT=0` turns it off.
+
 The server calls the compiled `pakon_probe` / `pakon_replay` binaries for hardware
 control and runs the Python image pipeline in a thread pool. Build the C tools
 first (`cmake --build build`). The `rpd.pf` profile (in `profiles/`) is used for
 the rendered JPEGs.
+
+## Roadmap
+
+Open work is tracked in [GitHub issues](https://github.com/jorshhh/pakon-macos/issues);
+`STATUS.md` has the background. In short:
+
+- **F-135+ built in code:** scan (#14), light calibration and flat field
+  (#15), film advance and eject (#16).
+- **Scan options:** resolution Base 4 / 8 / 16 (#17); B&W and slide film (#18).
+- **Image:** Digital ICE dust and scratch removal (#26); the remaining OEM
+  scene-balance stages (#22); DX barcode frame numbers (#24).
+- **Web UI:** progress while RAW/TIFF exports are built (#23).
+- **Distribution:** installable release builds for macOS, Windows and Linux
+  (#25).
+- **Open hardware questions:** #19, #20, #21.
 
 ## Firmware
 
