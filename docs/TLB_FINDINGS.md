@@ -102,6 +102,7 @@ den = (B[c]-D[c]) - (Bmask-Dmask); gain[c] = min(125*2^32/den, 0x3ffff) (IR 0x75
 "prefix terms" = drift of optically black pixels between bright and dark passes.
 Per line: 64000*65536/(b-d-Δblack) -> 16.16 fixed point, open gate -> 64000 (IR 60000).
 Smear = 65536*(Bmask-Dmask)/(Bactive-Dactive), kept only if 1..699.
+Applied per line in FUN_100246d0 (MMX): out = pmulhuw(sat(raw - dark[c] - smear term), gain[c] >> 2), i.e. (raw - dark) * gain / 2^18, so the open gate lands at 16000 in the 14-bit domain. Dark tables are u16 per column (struct +0x20/0x24/0x28), gains u32 16.16 (+0x30/0x34/0x38, IR +0x3c), smear (+0x40/0x44/0x48) times a running line level is a column-uniform offset. Implemented 2026-10-10 (dark + gain, not the smear term): `pakon_replay` writes the tables as JSON, `pakon_image.py` applies them.
 ### Film-base densities (FUN_10020230): calib duty capped at 1/10^D, scan duty = open-gate duty * 10^D
 colour neg R0.144 G0.40 B0.715 IR0; B&W C-41 0.10/0.25/0.25/0.08; other (positive at scan, B&W) 0/0.03/0/0.08
 ### Encodings

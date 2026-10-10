@@ -38,6 +38,9 @@ from pakon_image import (  # noqa: E402
     load_neg_matrix,
     render_oem,
     RpdLut,
+    apply_flat_field,
+    find_flat_field,
+    load_flat_field,
     oem_roll_balance,
     oem_rpd,
 )
@@ -154,6 +157,18 @@ def _build_ribbon(raw_path, emit):
     leads, _ = validated_leads(measure_leads(chans, 0, width))
     rgb = register_zones(chans, [(0, width)], [leads],
                          correct_seam=False, zone_perms=[None])
+
+    # Per-column flat field (the OEM's fixed-pattern correction): the scan's
+    # own RAW.flat.json, else the unit's flatfield.json from --light-cal.
+    # PAKON_FLAT=0 turns it off.
+    flat_path = (None if os.environ.get("PAKON_FLAT", "1") == "0"
+                 else find_flat_field(str(raw_path), find_eeprom_dir()))
+    if flat_path:
+        try:
+            apply_flat_field(rgb, load_flat_field(flat_path, width))
+            emit(f"Flat field: {Path(flat_path).name}", 0.55)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"flat field not applied: {exc}", file=sys.stderr)
     return rgb
 
 

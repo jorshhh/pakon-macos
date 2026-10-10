@@ -92,6 +92,47 @@ int pakon_lc_stats_range(const uint16_t *s, size_t nsamples, size_t line_px,
     return 0;
 }
 
+size_t pakon_lc_column_accum(const uint16_t *s, size_t nsamples, size_t line_px,
+                             size_t origin, double *sum, size_t *lines)
+{
+    if (!s || !sum || !lines || !line_px)
+        return 0;
+    size_t line = 4 * line_px;
+    size_t n = nsamples > origin ? (nsamples - origin) / line : 0;
+    for (size_t l = 0; l < n; l++) {
+        const uint16_t *rgb = s + origin + l * line;
+        const uint16_t *ir = rgb + 3 * line_px;
+        for (size_t p = 0; p < line_px; p++) {
+            sum[0 * line_px + p] += rgb[3 * p];
+            sum[1 * line_px + p] += rgb[3 * p + 1];
+            sum[2 * line_px + p] += rgb[3 * p + 2];
+            sum[3 * line_px + p] += ir[p];
+        }
+    }
+    *lines += n;
+    return n;
+}
+
+double pakon_lc_flat_gain(double bright, double dark, double black_bright,
+                          double black_dark)
+{
+    double den = (bright - dark) - (black_bright - black_dark);
+    if (den <= 0)
+        return 0;
+    double g = 64000.0 / den;
+    return g > 0x3ffff / 65536.0 ? 0x3ffff / 65536.0 : g;
+}
+
+unsigned pakon_lc_smear(double black_bright, double black_dark,
+                        double active_bright, double active_dark)
+{
+    double den = active_bright - active_dark;
+    if (den <= 0)
+        return 0;
+    double v = 65536.0 * (black_bright - black_dark) / den;
+    return v >= 1 && v <= 699 ? (unsigned)v : 0;
+}
+
 const double pakon_lc_density_c41[PAKON_LC_NCH] = { 0.144, 0.40, 0.715, 0.0 };
 
 int pakon_lc_offset_next(int offset, double black_mean)

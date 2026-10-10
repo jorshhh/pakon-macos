@@ -157,6 +157,53 @@ int main(void)
     CHECK(!pakon_lc_duty_settled(PAKON_LC_G, period - 2, 50000, period),
           "not settled: duty at its maximum and short of light");
 
+    /* Per-column sums over two reads (TLB.dll fixed-pattern tables).
+     * Pixel p of line l: R = 100 + p, G = 200 + l, B = 300, IR = 50 + p. */
+    {
+        enum { PX = 30, LINES = 3 };
+        size_t n = 7 + LINES * 4 * PX + 5;   /* lead, lines, partial line */
+        uint16_t *s = calloc(n, sizeof *s);
+        for (size_t l = 0; l < LINES; l++) {
+            uint16_t *rgb = s + 7 + l * 4 * PX;
+            for (size_t p = 0; p < PX; p++) {
+                rgb[3 * p] = (uint16_t)(100 + p);
+                rgb[3 * p + 1] = (uint16_t)(200 + l);
+                rgb[3 * p + 2] = 300;
+                rgb[3 * PX + p] = (uint16_t)(50 + p);
+            }
+        }
+        double *sum = calloc(PAKON_LC_NCH * PX, sizeof *sum);
+        size_t lines = 0;
+        size_t a = pakon_lc_column_accum(s, n, PX, 7, sum, &lines);
+        size_t b = pakon_lc_column_accum(s, n, PX, 7, sum, &lines);
+        CHECK(a == LINES && b == LINES && lines == 2 * LINES,
+              "column sums: whole lines only, accumulated over reads");
+        CHECK(sum[0 * PX + 4] == 2 * LINES * 104.0, "column sums: R per pixel");
+        CHECK(sum[1 * PX + 9] == 2 * (200 + 201 + 202.0), "column sums: G per line");
+        CHECK(sum[3 * PX + 29] == 2 * LINES * 79.0, "column sums: IR block");
+        CHECK(pakon_lc_column_accum(s, 10, PX, 7, sum, &lines) == 0 &&
+              lines == 2 * LINES, "column sums: short read adds nothing");
+        free(sum);
+        free(s);
+    }
+
+    /* Flat-field gain and smear (TLB.dll FUN_1001f550). */
+    CHECK(pakon_lc_flat_gain(64300, 300, 300, 300) == 1.0,
+          "gain: open gate at 64000 above dark -> 1.0");
+    CHECK(pakon_lc_flat_gain(32300, 300, 300, 300) == 2.0,
+          "gain: half the light -> 2.0");
+    CHECK(pakon_lc_flat_gain(32300, 300, 310, 300) == 64000.0 / 31990,
+          "gain: black-pixel drift is taken off the denominator");
+    CHECK(pakon_lc_flat_gain(10300, 300, 300, 300) == 0x3ffff / 65536.0,
+          "gain: capped at the 16.16 table maximum");
+    CHECK(pakon_lc_flat_gain(300, 300, 300, 300) == 0,
+          "gain: no light -> 0");
+    CHECK(pakon_lc_smear(310, 300, 64300, 300) == 10,
+          "smear: 65536 * 10 / 64000 = 10");
+    CHECK(pakon_lc_smear(300, 300, 64300, 300) == 0 &&
+          pakon_lc_smear(1300, 300, 64300, 300) == 0,
+          "smear: kept only within 1..699");
+
     if (failures) {
         printf("\n%d test(s) FAILED\n", failures);
         return 1;
