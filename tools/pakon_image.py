@@ -273,6 +273,63 @@ def invert_c41(rgb16, base, lut, matrix="none", wb=False, srgb=True):
 _RAW_BLACK = 300.0   # dark level the light calibration targets
 
 
+# --- Per-column flat field (TLB.dll FUN_1001f550 + the per-line MMX pass) ----
+# The OEM corrects every scan line per column: (raw - dark[c]) * gain[c], with
+# gain[c] = 64000 / ((bright[c] - dark[c]) - (black drift)) from 128 dark and
+# 128 open-gate calibration lines, so every column reads 64000 through the
+# empty gate. Without it the illumination falls off toward the sensor ends
+# (on serial 3054 to ~25% at scan column 0), which inverts to a bright band
+# along one edge of every frame. pakon_replay --light-cal / --scan-code write
+# the tables as JSON; this applies them in the raw 16-bit domain, keeping the
+# ~300 black, so the rest of the pipeline is unchanged.
+
+def find_flat_field(raw_path, eeprom_dir=None):
+    """The flat-field file for a raw: its own `<raw>.flat.json` (written by
+    pakon_replay --scan-code), else `<eeprom_dir>/flatfield.json` (written by
+    pakon_replay --light-cal). None if neither exists."""
+    for p in ([f"{raw_path}.flat.json"] +
+              ([os.path.join(str(eeprom_dir), "flatfield.json")] if eeprom_dir else [])):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def load_flat_field(path, width):
+    """(dark, gain), each (width, 3) float32, for scan columns 0..width-1 from
+    a flat-field JSON. Raises ValueError if the file does not cover `width`
+    columns (another resolution) or is malformed."""
+    import json
+    with open(path) as f:
+        ff = json.load(f)
+    lp, px0, nb = int(ff["line_px"]), int(ff["px0"]), int(ff["black_px"])
+    if lp - px0 != width:
+        raise ValueError(f"{path}: covers {lp - px0} columns, the scan has {width}")
+    dark = np.asarray(ff["dark"], np.float64)[:3]       # R, G, B; (3, line_px)
+    bright = np.asarray(ff["bright"], np.float64)[:3]
+    if dark.shape != (3, lp) or bright.shape != (3, lp):
+        raise ValueError(f"{path}: tables are not 3 x {lp}")
+    drift = bright[:, :nb].mean(1, keepdims=True) - dark[:, :nb].mean(1, keepdims=True)
+    den = (bright - dark) - drift
+    gain = np.where(den > 0, 64000.0 / np.maximum(den, 1e-9), 0.0)
+    gain = np.minimum(gain, 0x3FFFF / 65536.0)          # the OEM 16.16 table cap
+    return (dark[:, px0:].T.astype(np.float32),
+            gain[:, px0:].T.astype(np.float32))
+
+
+def apply_flat_field(rgb, flat, chunk=2048):
+    """In place on (rows, width, 3) uint16: black + (raw - dark[c]) * gain[c],
+    clipped to 0..65535. Returns rgb."""
+    dark, gain = flat
+    for r0 in range(0, rgb.shape[0], chunk):
+        x = rgb[r0:r0 + chunk].astype(np.float32)
+        x -= dark
+        x *= gain
+        x += _RAW_BLACK
+        np.clip(x, 0.0, 65535.0, out=x)
+        rgb[r0:r0 + chunk] = (x + 0.5).astype(np.uint16)
+    return rgb
+
+
 def load_neg_matrix(eeprom_dir):
     """The unit's 3x10 NegMatrix (rows R, G, B) from an EEPROM archive made by
     tools/pakon_eeprom.py backup. Raises ValueError if it does not decode."""
@@ -794,6 +851,12 @@ def main():
                          "triplet phase is independent of the capture start "
                          "(default on; fixes the inconsistent colour cast across "
                          "scans). --no-marker-align uses the raw byte-0 phase")
+    ap.add_argument("--flat", default=None, metavar="FILE",
+                    help="per-column flat field JSON (pakon_replay --light-cal / "
+                         "--scan-code); default RAW.flat.json, else "
+                         "EEPROM_DIR/flatfield.json when present")
+    ap.add_argument("--no-flat", action="store_true",
+                    help="skip the per-column flat field")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
     ap.add_argument("--frames", type=int, default=None,
                     help="split into N frames (default: auto-detect from valley count)")
@@ -961,6 +1024,19 @@ def main():
 
     rgb = register_zones(chans, zones, leads_per_zone, correct_seam=False,
                          zone_perms=zone_perms)  # (lines, width, 3)
+    flat_path = None if args.no_flat else (
+        args.flat or find_flat_field(args.raw, args.eeprom_dir))
+    if flat_path:
+        try:
+            apply_flat_field(rgb, load_flat_field(flat_path, width))
+            print(f"flat field: {flat_path}")
+        except (OSError, ValueError, KeyError) as exc:
+            if args.flat:
+                sys.exit(f"--flat: {exc}")
+            print(f"flat field: not applied ({exc})")
+    elif not args.no_flat:
+        print("flat field: none found (run pakon_replay --light-cal); the "
+              "edge falloff is left in")
     order_idx = {"r": 0, "g": 1, "b": 2}
     perm = [order_idx[c] for c in args.order.lower()]
     if perm != [0, 1, 2]:

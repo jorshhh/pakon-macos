@@ -1663,13 +1663,66 @@ typedef struct {
     int      gain[3], off[3];   /* R, G, B */
     unsigned cur[4];            /* R, G, B, IR */
     uint16_t duty[4];           /* open-gate duties, R, G, B, IR */
+    /* Fixed-pattern tables (TLB.dll phases 4 and 7): per-pixel means over
+     * the whole calibration line, [channel][pixel], R, G, B, IR. NULL when
+     * not captured. */
+    size_t   line_px, lines_dark, lines_bright;
+    double  *dark, *bright;
 } lc_result;
+
+static void lc_result_free(lc_result *res)
+{
+    free(res->dark);
+    free(res->bright);
+    res->dark = res->bright = NULL;
+}
+
+/* Lines per fixed-pattern table (TLB.dll averages 128). */
+#define LC_TABLE_LINES 128u
+
+/* Per-pixel means over >= LC_TABLE_LINES aligned lines, read the way
+ * lc_measure reads (re-arm, skip PROBE_SKIP_LINES, align each read). */
+static int lc_capture_columns(pakon_dev *dev, const pakon_setup_state *st,
+                              unsigned t, size_t line_px, uint16_t *samples,
+                              double *mean, size_t *lines)
+{
+    *lines = 0;
+    memset(mean, 0, PAKON_LC_NCH * line_px * sizeof *mean);
+    for (int read = 0; read < 8 && *lines < LC_TABLE_LINES; read++) {
+        size_t n = 0;
+        if (probe_rearm(dev, st, t) != PAKON_OK || probe_read(dev, st, t, samples, &n))
+            return 1;
+        long o = pakon_lc_find_origin(samples, n, line_px, LC_MIN_CONTRAST);
+        if (o < 0) {
+            fprintf(stderr, "light-cal: no light to align lines on\n");
+            return 1;
+        }
+        pakon_lc_column_accum(samples, n, line_px,
+                              (size_t)o + PROBE_SKIP_LINES * 4 * line_px, mean, lines);
+    }
+    if (*lines < LC_TABLE_LINES)
+        return 1;
+    for (size_t i = 0; i < PAKON_LC_NCH * line_px; i++)
+        mean[i] /= (double)*lines;
+    return 0;
+}
+
+/* Mean of pixels [p0, p1) of channel c in a [channel][pixel] table. */
+static double lc_table_mean(const double *t, size_t line_px, int c,
+                            size_t p0, size_t p1)
+{
+    double s = 0;
+    for (size_t p = p0; p < p1; p++)
+        s += t[c * line_px + p];
+    return p1 > p0 ? s / (double)(p1 - p0) : 0;
+}
 
 /* The calibration itself, on a session after setup_session (F-135, Base 16
  * + IR, period 0x742). Leaves acquire on and the LEDs at the open-gate
- * values. Returns 0 on convergence. */
+ * values. With `with_tables`, also captures the fixed-pattern tables into
+ * res (free with lc_result_free). Returns 0 on convergence. */
 static int light_cal_run(pakon_dev *dev, pakon_setup_state *st, unsigned t,
-                         unsigned offset, lc_result *res)
+                         unsigned offset, int with_tables, lc_result *res)
 {
     size_t line_px = (size_t)(st->reg5 - st->reg4);
     uint16_t *samples = malloc((size_t)PROBE_CHUNKS * PROBE_CHUNK);
@@ -1679,6 +1732,7 @@ static int light_cal_run(pakon_dev *dev, pakon_setup_state *st, unsigned t,
     pakon_lc_stats black, active;
     pakon_seq seq;
 
+    memset(res, 0, sizeof *res);
     if (!samples)
         return 1;
     pakon_cmd_service_events(dev, st->low, st->scn, t, NULL, NULL);
@@ -1803,6 +1857,52 @@ static int light_cal_run(pakon_dev *dev, pakon_setup_state *st, unsigned t,
         goto fail;
     }
 
+    /* 4. Fixed-pattern tables: dark (RGB LEDs off; the IR LED stays on as in
+     * the dark-offset loop so reads can be aligned, so the IR dark table is
+     * not a dark table), then bright at the calibrated values, which also
+     * leaves the LEDs where the scan start expects them. */
+    if (with_tables) {
+        res->line_px = line_px;
+        res->dark = malloc(PAKON_LC_NCH * line_px * sizeof *res->dark);
+        res->bright = malloc(PAKON_LC_NCH * line_px * sizeof *res->bright);
+        if (!res->dark || !res->bright)
+            goto fail;
+        pakon_led_values cur = { (uint8_t)curv[0], (uint8_t)curv[1],
+                                 (uint8_t)curv[2], (uint8_t)curv[3] };
+        pakon_seq_init(&seq);
+        if (pakon_setup_leds(&seq, st, 0x02, &ir_only,
+                             (const uint16_t[]){ 0, 0, 0, (period - 2) / 2 },
+                             period) != PAKON_OK ||
+            pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
+            goto fail;
+        lc_sleep_ms(200);
+        if (lc_capture_columns(dev, st, t, line_px, samples, res->dark,
+                               &res->lines_dark)) {
+            fprintf(stderr, "light-cal: dark table capture failed\n");
+            goto fail;
+        }
+        pakon_seq_init(&seq);
+        if (pakon_setup_leds(&seq, st, 0x03, &cur, duty, period) != PAKON_OK ||
+            pakon_cmd_run_seq(dev, &seq, t) != PAKON_OK)
+            goto fail;
+        lc_sleep_ms(200);
+        if (lc_capture_columns(dev, st, t, line_px, samples, res->bright,
+                               &res->lines_bright)) {
+            fprintf(stderr, "light-cal: bright table capture failed\n");
+            goto fail;
+        }
+        size_t act0 = offset > 6 ? offset - 6 : PAKON_LC_BLACK_PX + 20;
+        const char *nm3[3] = { "R", "G", "B" };
+        for (int c = 0; c < 3; c++) {
+            double bd = lc_table_mean(res->dark, line_px, c, 0, PAKON_LC_BLACK_PX);
+            double ad = lc_table_mean(res->dark, line_px, c, act0, line_px);
+            double ab = lc_table_mean(res->bright, line_px, c, act0, line_px);
+            printf("tables %s: %zu/%zu lines, dark black %.0f active %.0f "
+                   "(IR leak %+.0f), bright active %.0f\n", nm3[c],
+                   res->lines_dark, res->lines_bright, bd, ad, ad - bd, ab);
+        }
+    }
+
     for (int c = 0; c < 4; c++) {
         res->cur[c] = curv[c];
         res->duty[c] = duty[c];
@@ -1814,11 +1914,75 @@ static int light_cal_run(pakon_dev *dev, pakon_setup_state *st, unsigned t,
     free(samples);
     return 0;
 fail:
+    lc_result_free(res);
     free(samples);
     return 1;
 }
 
-static int do_light_cal(unsigned timeout, const char *eeprom_dir)
+/*
+ * Flat-field file (JSON) for the decoder (tools/pakon_image.py): the
+ * calibration-line tables, the black-pixel means, the smear coefficients and
+ * where the scan window sits in the line (scan column j = line pixel px0 +
+ * j; the scan window starts at the EEPROM Offset, calibration at pixel 6).
+ */
+static int lc_write_flat(const char *path, unsigned serial, unsigned offset,
+                         const lc_result *res)
+{
+    size_t lp = res->line_px, px0 = offset > 6 ? offset - 6 : 0;
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "cannot write '%s'\n", path);
+        return 1;
+    }
+    char when[32];
+    time_t now = time(NULL);
+    strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%S", localtime(&now));
+    fprintf(f, "{\n  \"version\": 1,\n  \"source\": \"pakon_replay light-cal\",\n");
+    fprintf(f, "  \"date\": \"%s\",\n  \"serial\": %u,\n  \"mode\": \"base16-ir\",\n",
+            when, serial);
+    fprintf(f, "  \"eeprom_offset\": %u,\n  \"line_px\": %zu,\n  \"px0\": %zu,\n"
+               "  \"black_px\": %u,\n", offset, lp, px0, PAKON_LC_BLACK_PX);
+    fprintf(f, "  \"lines_dark\": %zu,\n  \"lines_bright\": %zu,\n",
+            res->lines_dark, res->lines_bright);
+    fprintf(f, "  \"currents\": [%u, %u, %u, %u],\n  \"duties\": [%u, %u, %u, %u],\n",
+            res->cur[0], res->cur[1], res->cur[2], res->cur[3], res->duty[0],
+            res->duty[1], res->duty[2], res->duty[3]);
+    fprintf(f, "  \"afe_gains\": [%d, %d, %d],\n  \"afe_offsets\": [%d, %d, %d],\n",
+            res->gain[0], res->gain[1], res->gain[2], res->off[0], res->off[1],
+            res->off[2]);
+    fprintf(f, "  \"smear\": [");
+    for (int c = 0; c < 3; c++) {
+        double bd = lc_table_mean(res->dark, lp, c, 0, PAKON_LC_BLACK_PX);
+        double bb = lc_table_mean(res->bright, lp, c, 0, PAKON_LC_BLACK_PX);
+        double ad = lc_table_mean(res->dark, lp, c, px0, lp);
+        double ab = lc_table_mean(res->bright, lp, c, px0, lp);
+        fprintf(f, "%s%u", c ? ", " : "", pakon_lc_smear(bb, bd, ab, ad));
+    }
+    fprintf(f, "],\n");
+    const char *key[2] = { "dark", "bright" };
+    const double *tab[2] = { res->dark, res->bright };
+    for (int k = 0; k < 2; k++) {
+        fprintf(f, "  \"%s\": [\n", key[k]);
+        for (int c = 0; c < PAKON_LC_NCH; c++) {
+            fprintf(f, "    [");
+            for (size_t p = 0; p < lp; p++)
+                fprintf(f, "%s%.1f", p ? "," : "", tab[k][c * lp + p]);
+            fprintf(f, "]%s\n", c + 1 < PAKON_LC_NCH ? "," : "");
+        }
+        fprintf(f, "  ]%s\n", k ? "" : ",");
+    }
+    fprintf(f, "}\n");
+    int bad = ferror(f);
+    if (fclose(f) || bad) {
+        fprintf(stderr, "write error on '%s'\n", path);
+        return 1;
+    }
+    printf("flat field -> %s\n", path);
+    return 0;
+}
+
+static int do_light_cal(unsigned timeout, const char *eeprom_dir,
+                        const char *flat_out)
 {
     pakon_ctx *ctx;
     pakon_dev *dev;
@@ -1830,14 +1994,14 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
     const uint16_t period = 0x742;
     const char *nm[4] = { "R", "G", "B", "IR" };
     int rc = 1;
-    lc_result res;
+    lc_result res = { 0 };
     pakon_seq seq;
 
     if (st.low != AD_PICL) {
         fprintf(stderr, "light-cal: F-135 only for now\n");
         goto out;
     }
-    if (light_cal_run(dev, &st, t, e.base[PAKON_EEPROM_BASE16].offset, &res))
+    if (light_cal_run(dev, &st, t, e.base[PAKON_EEPROM_BASE16].offset, 1, &res))
         goto stop;
     printf("\n=== light calibration (serial %u, Base 16 + IR) ===\n", e.serial);
     printf("        current  open-gate duty  scan duty (C-41)\n");
@@ -1848,13 +2012,19 @@ static int do_light_cal(unsigned timeout, const char *eeprom_dir)
            res.gain[2], res.off[0], res.off[1], res.off[2]);
     printf("  OEM (scan.pakscan): currents R2 G3 B3 IR2, duties R896 G708 B278 "
            "IR1353, offsets -38/-31/-31\n");
-    rc = 0;
+    char flat_path[1024];
+    if (!flat_out) {
+        snprintf(flat_path, sizeof flat_path, "%s/flatfield.json", eeprom_dir);
+        flat_out = flat_path;
+    }
+    rc = lc_write_flat(flat_out, e.serial, e.base[PAKON_EEPROM_BASE16].offset, &res);
 stop:
     pakon_seq_init(&seq);
     pakon_setup_teardown(&seq, &st);
     printf("teardown: %s\n", pakon_cmd_run_seq(dev, &seq, t) == PAKON_OK
                              ? "OK" : "FAILED");
 out:
+    lc_result_free(&res);
     session_close(ctx, dev);
     return rc;
 }
@@ -2062,7 +2232,7 @@ static int do_scan_code(unsigned timeout, const char *eeprom_dir,
     unsigned t = timeout < 2000 ? 2000 : timeout;
     const uint16_t period = 0x742;
     int rc = 1;
-    lc_result res;
+    lc_result res = { 0 };
     pakon_seq seq;
     FILE *img = NULL;
 
@@ -2070,9 +2240,15 @@ static int do_scan_code(unsigned timeout, const char *eeprom_dir,
         fprintf(stderr, "scan-code: F-135 only for now\n");
         goto out;
     }
-    if (light_cal_run(dev, &st, t, e.base[PAKON_EEPROM_BASE16].offset, &res)) {
+    if (light_cal_run(dev, &st, t, e.base[PAKON_EEPROM_BASE16].offset, 1, &res)) {
         fprintf(stderr, "scan-code: calibration failed\n");
         goto stop;
+    }
+    {
+        /* The scan's own flat field, next to the raw (the decoder picks it up). */
+        char flat_path[1024];
+        snprintf(flat_path, sizeof flat_path, "%s.flat.json", image_path);
+        lc_write_flat(flat_path, e.serial, e.base[PAKON_EEPROM_BASE16].offset, &res);
     }
     uint16_t scan_duty[4];
     for (int c = 0; c < 4; c++)
@@ -2116,6 +2292,7 @@ stop:
 out:
     if (img)
         fclose(img);
+    lc_result_free(&res);
     session_close(ctx, dev);
     return rc;
 }
@@ -2249,7 +2426,7 @@ static void usage(const char *argv0)
         "       %s --configure [--prelude FILE]           program calibration regs from C\n"
         "       %s --setup --eeprom-dir DIR [--teardown]  controller init + Base 16 configure, built in code\n"
         "       %s --calib-probe --eeprom-dir DIR         static dark/lit line levels (F-135, open gate)\n"
-        "       %s --light-cal --eeprom-dir DIR           light calibration in code (F-135, open gate)\n"
+        "       %s --light-cal --eeprom-dir DIR [--flat-out FILE]  light calibration in code (F-135, open gate)\n"
         "       %s --scan-code --eeprom-dir DIR [--image OUT]  scan with nothing replayed (F-135)\n"
         "       %s --film-sense SECONDS --eeprom-dir DIR  run the transport, log DX levels (F-135)\n"
         "       %s --advance-code SECONDS --eeprom-dir DIR  timed film advance in code (F-135)\n"
@@ -2261,6 +2438,8 @@ static void usage(const char *argv0)
         "  --calibrate   run the driven CALIBRATE (measure open-gate CCD ->\n"
         "                compute gain/offset); present the open gate, no film\n"
         "  --cal-lines N  CCD lines to average per measurement (default 32)\n"
+        "  --flat-out FILE  where --light-cal writes the flat field (default\n"
+        "                DIR/flatfield.json; --scan-code writes OUT.flat.json)\n"
         "  --cal-exposure N  nominal CcdExposure for the gain phase (default 256)\n"
         "  --prelude FILE replay a .pakscan setup spine (CCD+lamp init) before\n"
         "                calibrating -- needed for the gain phase (illumination)\n"
@@ -2309,6 +2488,7 @@ int main(int argc, char **argv)
     unsigned long cal_exposure = 256;
     const char *cal_prelude = NULL;
     const char *params_out = NULL;
+    const char *flat_out = NULL;
     const char *scan_file = NULL;
     const char *scan_sm_file = NULL;
     const char *advance_file = NULL;
@@ -2341,6 +2521,8 @@ int main(int argc, char **argv)
             film_sense_s = (unsigned)strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "--scan-code")) {
             want_scan_code = 1;
+        } else if (!strcmp(argv[i], "--flat-out") && i + 1 < argc) {
+            flat_out = argv[++i];
         } else if (!strcmp(argv[i], "--light-cal")) {
             want_lightcal = 1;
         } else if (!strcmp(argv[i], "--calib-probe")) {
@@ -2414,7 +2596,7 @@ int main(int argc, char **argv)
     if (want_scan_code)
         return do_scan_code(timeout, eeprom_dir, image_path, max_mb);
     if (want_lightcal)
-        return do_light_cal(timeout, eeprom_dir);
+        return do_light_cal(timeout, eeprom_dir, flat_out);
     if (want_probe)
         return do_calib_probe(timeout, eeprom_dir);
     if (want_setup)

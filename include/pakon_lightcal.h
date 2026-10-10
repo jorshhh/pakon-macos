@@ -57,6 +57,35 @@ int pakon_lc_stats_range(const uint16_t *s, size_t nsamples, size_t line_px,
                          size_t origin, size_t px0, size_t px1,
                          pakon_lc_stats *out);
 
+/*
+ * Per-column sums for the fixed-pattern tables (TLB.dll FUN_1001f550): adds
+ * every pixel of every whole line from `origin` to `sum`, laid out
+ * [channel][pixel] (PAKON_LC_NCH * line_px doubles, RGB block then the IR
+ * block), and adds the number of lines to *lines. Call once per read to
+ * build up 128+ lines over several reads. Returns the lines added (0 if no
+ * whole line fits).
+ */
+size_t pakon_lc_column_accum(const uint16_t *s, size_t nsamples, size_t line_px,
+                             size_t origin, double *sum, size_t *lines);
+
+/*
+ * Flat-field gain for one column (TLB.dll FUN_1001f550, as means instead of
+ * 128-line sums): 64000 / ((bright - dark) - (black_bright - black_dark)),
+ * the factor that brings the open gate to 64000 after dark subtraction.
+ * The black-pixel term removes drift of the optically black pixels between
+ * the two passes. Capped at 0x3ffff / 65536 (~4.0) like the OEM's 16.16
+ * table; 0 when the denominator is not positive.
+ */
+double pakon_lc_flat_gain(double bright, double dark, double black_bright,
+                          double black_dark);
+
+/*
+ * Smear coefficient (16.16, TLB.dll): 65536 * (black_bright - black_dark) /
+ * (active_bright - active_dark), kept only within 1..699, else 0.
+ */
+unsigned pakon_lc_smear(double black_bright, double black_dark,
+                        double active_bright, double active_dark);
+
 /* ---- Calibration steps (TLB.dll FN_bCalibrateLEDs, docs/TLB_FINDINGS.md) */
 
 #define PAKON_LC_GAIN_START     13      /* A/D gain code (g = 1.2) */

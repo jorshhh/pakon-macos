@@ -33,6 +33,11 @@ What the 135-line engine actually does to colour-negative data
 
 1. The raw stream is calibrated per column (dark subtraction + 16.16 gain that
    normalises the open gate to 64000) into the 14-bit domain.
+   We do the same from the tables `pakon_replay --light-cal` / `--scan-code`
+   write (`flatfield.json` / `RAW.flat.json`); `pakon_image.py` applies them
+   right after channel registration (`--flat FILE`, `--no-flat`; web:
+   `PAKON_FLAT=0` turns it off). Scan column j is calibration pixel
+   Offset − 6 + j.
 2. **Per-plane density LUT** on planar data: `LUT[i] = 3500·log10(16383/i)`,
    16384 entries, `LUT[0] = 0x3FFF`.
 3. **Per-unit 3×10 matrix in density space** (NegMatrix from the EEPROM; PosMatrix
