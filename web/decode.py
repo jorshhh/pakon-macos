@@ -97,14 +97,19 @@ def _sba_on():
     return os.environ.get("PAKON_OEM_SBA", "1") != "0" and oem_sba.available()
 
 
-def _sba_shifts(crops, oem):
-    """OEM SBA per-frame RPD shifts (n, 3) for raw frame crops, or None when
-    it is unavailable or fails (the caller falls back to the roll balance)."""
+def _sba_shifts(crops, oem, roll=None):
+    """OEM SBA per-frame RPD shifts (n, 3) for raw frame crops, balanced
+    against `roll` (raw crops of the whole roll; default the crops), or None
+    when it is unavailable or fails (the caller falls back to the roll
+    balance)."""
     if not crops or oem is None or not _sba_on():
         return None
     try:
-        imgs = [oem_sba.analysis_image(c, oem[0], oem[1], oem_rpd) for c in crops]
-        return oem_sba.roll_shifts(imgs)
+        def analysis(c):
+            return oem_sba.analysis_image(c, oem[0], oem[1], oem_rpd)
+        imgs = [analysis(c) for c in crops]
+        return oem_sba.roll_shifts(
+            imgs, roll=None if roll is None else [analysis(c) for c in roll])
     except Exception as exc:                       # never block an export
         print(f"OEM SBA failed, using the roll balance: {exc}", file=sys.stderr)
         return None
@@ -240,7 +245,8 @@ def prescan(raw_path, progress=None) -> dict:
 
 
 def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
-                  frame_w=_FRAME_W, progress=None, rpd_balance=None) -> list[dict]:
+                  frame_w=_FRAME_W, progress=None, rpd_balance=None,
+                  roll_centres=None) -> list[dict]:
     """Stage 2. Crop the cached ribbon at each confirmed centre, invert and
     render, write TIFF/JPEG. With the scanner's EEPROM archive and rpd.pf this
     is the OEM F-135 colour path (density LUT -> NegMatrix -> rpd.pf), for both
@@ -248,7 +254,11 @@ def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
 
     `widths` is an optional per-frame crop width (full-res rows) parallel to
     `centres` — lets the operator mix full- and half-frame boxes. When omitted,
-    every crop uses `frame_w`."""
+    every crop uses `frame_w`.
+
+    `roll_centres` are the prescan's detected frames: the OEM scene balance
+    weighs the exported frames against the whole roll, so a few similar
+    frames exported alone are not pushed toward their own average."""
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     def emit(step, pct):
@@ -265,16 +275,19 @@ def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
     frames = []
     n = len(centres)
 
-    def crop(i):
-        fw = int(widths[i]) if widths else frame_w
-        r1 = min(rows, max(0, int(centres[i]) - fw // 2) + fw)
+    def crop_at(centre, fw):
+        r1 = min(rows, max(0, int(centre) - fw // 2) + fw)
         return rgb[max(0, r1 - fw):r1]
 
-    # OEM scene balance over the confirmed frames (a roll-level analysis, so
-    # all crops first); falls back to the prescan roll balance.
+    def crop(i):
+        return crop_at(centres[i], int(widths[i]) if widths else frame_w)
+
+    # OEM scene balance of the confirmed frames against the whole roll (all
+    # crops first); falls back to the prescan roll balance.
     if oem is not None and _sba_on():
         emit("OEM scene balance", 0.0)
-    shifts = _sba_shifts([crop(i) for i in range(n)], oem)
+    roll = [crop_at(c, frame_w) for c in roll_centres] if roll_centres else None
+    shifts = _sba_shifts([crop(i) for i in range(n)], oem, roll)
 
     for i in range(n):
         emit(f"Exporting frame {i + 1}/{n}", (i + 1) / max(1, n))

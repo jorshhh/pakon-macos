@@ -592,7 +592,8 @@ async def api_export_frames(
         return export_frames(meta["ribbon"], meta["base"], centres,
                              widths=widths, rotate=rotate,
                              frame_w=meta["frame_w"], progress=prog,
-                             rpd_balance=meta.get("rpd_balance"))
+                             rpd_balance=meta.get("rpd_balance"),
+                             roll_centres=meta.get("centres"))
 
     def _done(result):
         _state["frames"] = result
