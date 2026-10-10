@@ -232,6 +232,15 @@ PosMatrix (no inversion), B&W the NegMatrix then grey; `pakon_image.py` has
 
 ## Feature work (independent of the replay-free steps)
 
+- **DX barcode (frame numbers, film identity).** The event service already
+  reads the 30-byte `0x90` sensor block (decoded DX entries, layout in
+  pakon-reference `dx-barcode.md`) and discards it. First log it during one
+  scan to see whether this unit's sensor decodes at all (Ali Bosworth's
+  F-135+ decodes nothing); about 30 minutes, no new commands. If it does:
+  frame numbers for export labels, and the film product code. Not needed for
+  colour: the OEM install ships only default film/colour LUTs; the DX-keyed
+  data it does ship is 11 noise-reduction parameter files (inferred from the
+  file names, not traced in code).
 - **Release CI: installable builds on every release.** Each time a release is
   cut (a `v*` tag / GitHub release), a CI workflow builds executables for
   **macOS**, **Windows** and **Linux (`.deb`)** and publishes them to a
