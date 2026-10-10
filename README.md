@@ -341,8 +341,11 @@ flow**:
 2. **Confirm frames** — position each crop on the strip (click to place, **+Add /
    −Remove**, keyboard **←/→** nudge, **↑/↓** prev/next, **Enter** next).
 3. **Export** — only the confirmed crops are cropped at full resolution and run
-   through the C-41 inversion + `rpd.pf` render. Download per-frame raw negative
-   / TIFF / JPEG, a zip of any format, or a JPEG contact sheet.
+   through the C-41 inversion + `rpd.pf` render. Colour and density are balanced
+   per frame by the OEM's own scene balance (Kodak SBA + roll analysis), run from
+   `oem/PakonIMAu.dll` under emulation (`tools/oem_sba.py`; needs `unicorn` and
+   `pefile` from `web/requirements.txt`). Download per-frame raw negative / TIFF /
+   JPEG, a zip of any format, or a JPEG contact sheet.
 
 The server calls the compiled `pakon_probe` / `pakon_replay` binaries for hardware
 control and runs the Python image pipeline in a thread pool. Build the C tools

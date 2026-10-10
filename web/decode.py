@@ -39,7 +39,9 @@ from pakon_image import (  # noqa: E402
     render_oem,
     RpdLut,
     oem_roll_balance,
+    oem_rpd,
 )
+import oem_sba  # noqa: E402
 
 WORK_DIR = Path("/tmp/pakon_web")
 # Row layout is auto-detected per raw (F-135 vs the F-135+ per-resolution
@@ -82,6 +84,25 @@ def _oem_path():
             _OEM["value"] = None
         _OEM["key"] = key
     return _OEM["value"]
+def _sba_on():
+    """The OEM scene balance (tools/oem_sba.py) runs when its emulator and
+    oem/ are available; PAKON_OEM_SBA=0 turns it off."""
+    return os.environ.get("PAKON_OEM_SBA", "1") != "0" and oem_sba.available()
+
+
+def _sba_shifts(crops, oem):
+    """OEM SBA per-frame RPD shifts (n, 3) for raw frame crops, or None when
+    it is unavailable or fails (the caller falls back to the roll balance)."""
+    if not crops or oem is None or not _sba_on():
+        return None
+    try:
+        imgs = [oem_sba.analysis_image(c, oem[0], oem[1], oem_rpd) for c in crops]
+        return oem_sba.roll_shifts(imgs)
+    except Exception as exc:                       # never block an export
+        print(f"OEM SBA failed, using the roll balance: {exc}", file=sys.stderr)
+        return None
+
+
 RIBBON_PATH = WORK_DIR / "ribbon.npy"
 PREVIEW_PATH = WORK_DIR / "preview.jpg"
 _PREVIEW_H = 300               # target short-axis (frame height) of the preview
@@ -169,7 +190,13 @@ def prescan(raw_path, progress=None) -> dict:
     balance = None
     if oem is not None:                                  # OEM colour path
         balance = oem_roll_balance(small, oem[0], oem[1])  # once per roll
-        pos = render_oem(small, *oem, balance=balance)
+        fw = int(min(_FRAME_W, pitch))
+        shifts = _sba_shifts([rgb[max(0, c - fw // 2):c + fw // 2] for c in centres], oem)
+        # The strip gets the roll's mean OEM shift; the export applies each
+        # frame's own.
+        pos = render_oem(small, *oem, balance=(
+            balance if shifts is None else
+            (np.ones(3, np.float32), shifts.mean(axis=0))))
     else:
         pos = invert_c41(small, base, _c41_lut())        # quick sRGB positive
     strip = np.rot90((pos >> 8).astype(np.uint8), k=1)  # long axis -> horizontal x
@@ -219,20 +246,29 @@ def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
     frames = []
     n = len(centres)
 
-    for i, centre in enumerate(centres):
-        emit(f"Exporting frame {i + 1}/{n}", (i + 1) / max(1, n))
+    def crop(i):
         fw = int(widths[i]) if widths else frame_w
-        half = fw // 2
-        r0 = max(0, int(centre) - half)
-        r1 = min(rows, r0 + fw)
-        r0 = max(0, r1 - fw)
-        part = np.ascontiguousarray(rgb[r0:r1])
+        r1 = min(rows, max(0, int(centres[i]) - fw // 2) + fw)
+        return rgb[max(0, r1 - fw):r1]
+
+    # OEM scene balance over the confirmed frames (a roll-level analysis, so
+    # all crops first); falls back to the prescan roll balance.
+    if oem is not None and _sba_on():
+        emit("OEM scene balance", 0.0)
+    shifts = _sba_shifts([crop(i) for i in range(n)], oem)
+
+    for i in range(n):
+        emit(f"Exporting frame {i + 1}/{n}", (i + 1) / max(1, n))
+        part = np.ascontiguousarray(crop(i))
         if rot_k:
             part = np.ascontiguousarray(np.rot90(part, k=rot_k))
 
         if oem is not None:                           # OEM colour path
-            bal = (None if rpd_balance is None else
-                   tuple(np.asarray(v, np.float32) for v in rpd_balance))
+            if shifts is not None:
+                bal = (np.ones(3, np.float32), shifts[i])
+            else:
+                bal = (None if rpd_balance is None else
+                       tuple(np.asarray(v, np.float32) for v in rpd_balance))
             pos = render_oem(part, *oem, balance=bal)
             rendered = (pos >> 8).astype(np.uint8)
         else:
