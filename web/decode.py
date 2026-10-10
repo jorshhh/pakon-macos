@@ -35,6 +35,10 @@ from pakon_image import (  # noqa: E402
     render_jpeg,
     validated_leads,
     _c41_lut,
+    load_neg_matrix,
+    render_oem,
+    RpdLut,
+    oem_roll_balance,
 )
 
 WORK_DIR = Path("/tmp/pakon_web")
@@ -44,6 +48,40 @@ _LINEWIDTH_OVERRIDE = os.environ.get("PAKON_LINEWIDTH")
 _IR_LANE_OVERRIDE = os.environ.get("PAKON_IR_LANE")
 _REPO = Path(__file__).resolve().parent.parent
 RPD_PROFILE = _REPO / "profiles" / "rpd.pf"
+
+
+def find_eeprom_dir() -> Path | None:
+    """The scanner's EEPROM archive: PAKON_EEPROM_DIR, else the newest archive
+    under backups/eeprom/ (tools/pakon_eeprom.py backup)."""
+    override = os.environ.get("PAKON_EEPROM_DIR")
+    if override:
+        p = Path(override).expanduser()
+        return p if p.is_dir() else None
+    root = _REPO / "backups" / "eeprom"
+    if not root.is_dir():
+        return None
+    archives = [d for d in root.iterdir()
+                if (d / "eeprom_0x52_sectionA_primary.bin").exists()]
+    return max(archives, key=lambda d: d.stat().st_mtime) if archives else None
+
+
+_OEM = {"key": None, "value": None}
+
+
+def _oem_path():
+    """(NegMatrix, LUT, RpdLut) for the OEM colour path, or None when the
+    EEPROM archive or rpd.pf is missing (then the Dmin inversion is used)."""
+    eeprom = find_eeprom_dir()
+    if eeprom is None or not RPD_PROFILE.exists():
+        return None
+    key = str(eeprom)
+    if _OEM["key"] != key:
+        try:
+            _OEM["value"] = (load_neg_matrix(key), _c41_lut(), RpdLut(str(RPD_PROFILE)))
+        except (OSError, ValueError):
+            _OEM["value"] = None
+        _OEM["key"] = key
+    return _OEM["value"]
 RIBBON_PATH = WORK_DIR / "ribbon.npy"
 PREVIEW_PATH = WORK_DIR / "preview.jpg"
 _PREVIEW_H = 300               # target short-axis (frame height) of the preview
@@ -127,7 +165,13 @@ def prescan(raw_path, progress=None) -> dict:
     emit("Rendering preview", 0.85)
     ds = max(1, int(round(cols / _PREVIEW_H)))   # ~_PREVIEW_H px tall frames
     small = np.ascontiguousarray(rgb[::ds, ::ds])
-    pos = invert_c41(small, base, _c41_lut())          # quick sRGB positive
+    oem = _oem_path()
+    balance = None
+    if oem is not None:                                  # OEM colour path
+        balance = oem_roll_balance(small, oem[0], oem[1])  # once per roll
+        pos = render_oem(small, *oem, balance=balance)
+    else:
+        pos = invert_c41(small, base, _c41_lut())        # quick sRGB positive
     strip = np.rot90((pos >> 8).astype(np.uint8), k=1)  # long axis -> horizontal x
     Image.fromarray(strip).save(str(PREVIEW_PATH), "JPEG", quality=85)
     prev_w, prev_h = strip.shape[1], strip.shape[0]     # PIL (w,h)
@@ -137,6 +181,9 @@ def prescan(raw_path, progress=None) -> dict:
     return {
         "ribbon": str(RIBBON_PATH),
         "base": [float(x) for x in base],
+        "rpd_balance": (None if balance is None else
+                        [[float(x) for x in balance[0]],
+                         [float(x) for x in balance[1]]]),
         "rows": int(rows), "cols": int(cols),
         "pitch": int(pitch),
         "frame_w": int(min(_FRAME_W, pitch)),
@@ -147,9 +194,11 @@ def prescan(raw_path, progress=None) -> dict:
 
 
 def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
-                  frame_w=_FRAME_W, progress=None) -> list[dict]:
-    """Stage 2. Crop the cached ribbon at each confirmed centre, run the full
-    C-41 inversion + rpd.pf render, write TIFF/JPEG.
+                  frame_w=_FRAME_W, progress=None, rpd_balance=None) -> list[dict]:
+    """Stage 2. Crop the cached ribbon at each confirmed centre, invert and
+    render, write TIFF/JPEG. With the scanner's EEPROM archive and rpd.pf this
+    is the OEM F-135 colour path (density LUT -> NegMatrix -> rpd.pf), for both
+    the TIFF and the JPEG; otherwise the Dmin inversion + rpd.pf JPEG render.
 
     `widths` is an optional per-frame crop width (full-res rows) parallel to
     `centres` — lets the operator mix full- and half-frame boxes. When omitted,
@@ -165,6 +214,7 @@ def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
     base = np.asarray(base, dtype=np.float32)
     lut = _c41_lut()
     use_rpd = RPD_PROFILE.exists()
+    oem = _oem_path()
     rot_k = (rotate // 90) % 4
     frames = []
     n = len(centres)
@@ -180,9 +230,15 @@ def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
         if rot_k:
             part = np.ascontiguousarray(np.rot90(part, k=rot_k))
 
-        pos = invert_c41(part, base, lut)             # 16-bit sRGB positive
-        rendered = (render_jpeg(pos, str(RPD_PROFILE)) if use_rpd
-                    else (pos >> 8).astype(np.uint8))
+        if oem is not None:                           # OEM colour path
+            bal = (None if rpd_balance is None else
+                   tuple(np.asarray(v, np.float32) for v in rpd_balance))
+            pos = render_oem(part, *oem, balance=bal)
+            rendered = (pos >> 8).astype(np.uint8)
+        else:
+            pos = invert_c41(part, base, lut)         # 16-bit sRGB positive
+            rendered = (render_jpeg(pos, str(RPD_PROFILE)) if use_rpd
+                        else (pos >> 8).astype(np.uint8))
 
         raw_tiff = WORK_DIR / f"frame_{i + 1:02d}_raw.tif"
         pos_tiff = WORK_DIR / f"frame_{i + 1:02d}.tif"

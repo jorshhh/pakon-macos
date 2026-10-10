@@ -79,6 +79,9 @@ find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(NAME test_eeprom
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_eeprom.py)
+  # Skips itself when numpy/Pillow are missing from that interpreter.
+  add_test(NAME test_image_colour
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_image_colour.py)
 else()
   message(STATUS "Python3 not found: offline EEPROM tests are unavailable")
 endif()

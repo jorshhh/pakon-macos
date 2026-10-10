@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .decode import (WORK_DIR, PREVIEW_PATH, prescan, export_frames,
-                     make_contact_sheet)
+                     make_contact_sheet, find_eeprom_dir)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -50,9 +50,8 @@ _FW = Path(os.environ.get("PAKON_FIRMWARE", str(_REPO / "firmware")))
 FW_STAGE1  = _FW / "PknLdr.hex"
 FW_MAIN    = _FW / "Pakon7.hex"
 # The unit's EEPROM archive (tools/pakon_eeprom.py backup) is what the
-# replay-free scan reads its per-unit values from. PAKON_EEPROM_DIR picks one;
-# otherwise the newest archive under backups/eeprom/ is used.
-EEPROM_DIR_OVERRIDE = os.environ.get("PAKON_EEPROM_DIR")
+# replay-free scan and the OEM colour path read their per-unit values from.
+# PAKON_EEPROM_DIR picks one; otherwise the newest under backups/eeprom/.
 # The scan script is model-specific (the two models' PICs live at different
 # bus addresses); the model is detected at scan time via pakon_replay --open.
 # PAKON_PAKSCAN overrides the choice with an explicit script path.
@@ -75,15 +74,7 @@ _state: dict = {
 
 
 def _eeprom_dir() -> Path | None:
-    if EEPROM_DIR_OVERRIDE:
-        p = Path(EEPROM_DIR_OVERRIDE).expanduser()
-        return p if p.is_dir() else None
-    root = _REPO / "backups" / "eeprom"
-    if not root.is_dir():
-        return None
-    archives = [d for d in root.iterdir()
-                if (d / "eeprom_0x52_sectionA_primary.bin").exists()]
-    return max(archives, key=lambda d: d.stat().st_mtime) if archives else None
+    return find_eeprom_dir()
 
 
 def _fw_hex_available() -> bool:
@@ -565,7 +556,8 @@ async def api_export_frames(
     def _work(prog):
         return export_frames(meta["ribbon"], meta["base"], centres,
                              widths=widths, rotate=rotate,
-                             frame_w=meta["frame_w"], progress=prog)
+                             frame_w=meta["frame_w"], progress=prog,
+                             rpd_balance=meta.get("rpd_balance"))
 
     def _done(result):
         _state["frames"] = result

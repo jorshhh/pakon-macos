@@ -232,6 +232,20 @@ PosMatrix (no inversion), B&W the NegMatrix then grey; `pakon_image.py` has
 
 ## Feature work (independent of the replay-free steps)
 
+- **Ansel scene balance (SBA/DSBA)** — deferred, see `docs/DECISIONS.md`
+  (2026-10-09). When picked up: a ~1 day scoping pass in the decompiled
+  `PakonIMAu.dll` (functions, inputs, data files), then reimplement only the
+  scene balance (1–3 days), reading Kodak's data files from the user's OEM
+  install. A TLX reference scan would let the result be checked.
+- **Web UI: show that RAW/TIFF exports are being generated.** Exporting raw
+  negatives or TIFFs takes a while with no feedback: each button just
+  navigates to `/api/export?fmt=…`, and the server builds the whole zip
+  (deflate-compressing every 16-bit TIFF) before the download starts, so
+  the page looks idle. Fix: disable the button and show "Preparing N
+  TIFFs…" while it runs, ideally with per-frame progress (build the zip as
+  an SSE job like Process/Export, then hand the browser the download), and
+  consider `ZIP_STORED` for the TIFFs, since deflating large 16-bit images
+  is most of the wait.
 - **DX barcode (frame numbers, film identity).** The event service already
   reads the 30-byte `0x90` sensor block (decoded DX entries, layout in
   pakon-reference `dx-barcode.md`) and discards it. First log it during one

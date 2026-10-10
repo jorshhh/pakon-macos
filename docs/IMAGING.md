@@ -17,8 +17,11 @@ committed.
 - The vibrant **JPEG "look"** is the inverted image run through Kodak's **`rpd.pf`
   ICC rendering profile** + a scene-balance/tone pass. The plain **TIFF** is the
   scene-referred positive (no render).
-- `tools/pakon_image.py` now implements **both**: `--invert-c41` (faithful
-  positive) and `--jpeg` (rpd.pf render). It also marker-aligns each row,
+- `tools/pakon_image.py` implements the **OEM F-135 colour path** when given
+  the scanner's EEPROM archive (`--invert-c41 --eeprom-dir DIR`, and the web
+  export whenever an archive is found): density LUT → the unit's NegMatrix →
+  `rpd.pf`. Without one it falls back to `--invert-c41` (Dmin positive) and
+  `--jpeg` (rpd.pf render with auto-levels). It also marker-aligns each row,
   registers the trilinear lines, autocrops, and detects frames.
 - The web service is a **two-stage minilab flow**: prescan → operator confirms
   crops in the browser → high-res export.
@@ -45,9 +48,27 @@ light calibration raises scan duty by `10^D` of a nominal base density
 (colour negative R 0.144, G 0.40, B 0.715), so the base is largely neutralised
 optically before the data reaches the LUT [I].
 
-Our `--invert-c41` does not use the matrix: measured Dmin normalisation → LUT
-→ sRGB, which matches the OEM output closely. Adding the per-unit NegMatrix
-(read with `--read-params`) is the natural next step for OEM-faithful colour.
+**Implemented (2026-10-09), `render_oem` in `tools/pakon_image.py`:** raw
+16-bit minus the calibrated black (~300) ÷ 4 → 14-bit → the LUT → the unit's
+NegMatrix (all ten terms) → 12-bit RPD → `rpd.pf` → sRGB. Two facts make this
+fit: on serial 3054 the NegMatrix is a near-diagonal 0.28 (≈ 1000 / 3500, so
+3500 codes per density decade become ~1000 per decade) with offsets
+167 / 452 / 671; and `rpd.pf` is an **input** profile (scanner class, RGB → Lab)
+whose RGB is that 12-bit RPD. The old path fed `rpd.pf` an sRGB-encoded
+positive and then auto-levelled each channel separately, which skewed and
+oversaturated the colour. Pillow's colour management is 8-bit, so `rpd.pf` is
+sampled into a 52³ table on exact 8-bit nodes and applied trilinearly to keep
+16-bit precision.
+
+**Roll balance (stand-in for the OEM's Ansel roll balance), `oem_roll_balance`:**
+without it the output leans blue. Per channel, in RPD: the film base stays put
+and the roll's picture median moves half way to neutral (a per-channel affine,
+like Ansel's SCP stage); measured once per roll, applied to every frame
+(`--oem-balance`, default 0.5). Chosen by eye on two rolls (serial 3054,
+2026-10-09) against the alternatives: a per-frame neutral balance turned a blue
+sky white; a plain per-channel offset left blue shadows; also making the film
+base neutral pushed one roll blue and the other cream, so `rpd.pf` appears to
+expect an unbalanced base. Not compared against OEM output yet.
 
 ## The recovered inversion LUT
 
