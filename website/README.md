@@ -22,6 +22,15 @@ Open <http://localhost:2368/ghost>, create the admin account, then:
 2. **Settings → Labs → Routes → Upload routes file**: upload `routes.yaml`.
 3. **Settings → Navigation**: set the primary links, e.g. *Blog* `/blog/`.
    The header adds the GitHub link on its own.
+4. **Settings → Design & branding → Brand → Publication icon**: upload
+   `pakon-icon.png` (the browser-tab icon).
+
+The header logo and `pakon-icon.png` are made from the artwork by
+`brand/make_logo.py`, which also writes `brand/logo.png` (the app icon's source):
+
+```sh
+python brand/make_logo.py path/to/artwork.jpeg
+```
 
 Without step 2 the homepage still works, but the blog has no `/blog/` page.
 
