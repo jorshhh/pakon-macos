@@ -264,6 +264,126 @@ def invert_c41(rgb16, base, lut, matrix="none", wb=False, srgb=True):
     return np.clip(pos * 4.0, 0.0, 65535.0).astype(np.uint16)
 
 
+# --- OEM F-135 colour path (TLB.dll FN_bLoadImageFromBuffer, docs/IMAGING.md) --
+# raw (open-gate calibrated, ~300 black) -> 14-bit -> the ColNeg density LUT ->
+# the unit's own 3x10 NegMatrix from the EEPROM (density -> 12-bit RPD) ->
+# Kodak rpd.pf (an input profile: RPD -> Lab) -> sRGB. No auto-levels and no
+# per-channel stretch: those were what oversaturated the old --jpeg render.
+
+_RAW_BLACK = 300.0   # dark level the light calibration targets
+
+
+def load_neg_matrix(eeprom_dir):
+    """The unit's 3x10 NegMatrix (rows R, G, B) from an EEPROM archive made by
+    tools/pakon_eeprom.py backup. Raises ValueError if it does not decode."""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "pakon_eeprom", os.path.join(here, "pakon_eeprom.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.read_archive(eeprom_dir)
+    m = report.get("decoded", {}).get("negative_matrix")
+    if not report.get("decodable") or m is None:
+        raise ValueError(f"no usable NegMatrix in {eeprom_dir}")
+    return np.array(m, dtype=np.float32)
+
+
+def oem_rpd(rgb16, negmat, lut):
+    """Raw 16-bit RGB -> 12-bit RPD (float32, 0..4095) the way TLB.dll does it:
+    14-bit, the density LUT, then the 3x10 polynomial
+    m0 R + m1 G + m2 B + m3 R^2 + m4 G^2 + m5 B^2 + m6 RG + m7 BR + m8 GB + m9."""
+    x = np.clip((rgb16.astype(np.float32) - _RAW_BLACK) / 4.0, 1.0, 16383.0)
+    d = lut[x.astype(np.uint16)]
+    r, g, b = d[..., 0], d[..., 1], d[..., 2]
+    out = np.empty(d.shape, dtype=np.float32)
+    for c in range(3):
+        m = negmat[c]
+        out[..., c] = (m[0] * r + m[1] * g + m[2] * b + m[3] * r * r +
+                       m[4] * g * g + m[5] * b * b + m[6] * r * g +
+                       m[7] * b * r + m[8] * g * b + m[9])
+    return np.clip(out, 0.0, 4095.0)
+
+
+class RpdLut:
+    """rpd.pf (RPD -> Lab) to sRGB as a 3-D table on exact 8-bit nodes (every
+    5th code, 52 per axis), applied with trilinear interpolation so 16-bit
+    data keeps its precision (Pillow's colour management is 8-bit only)."""
+
+    def __init__(self, rpd_path):
+        from PIL import Image, ImageCms
+        nodes = np.arange(0, 256, 5, dtype=np.uint8)
+        self.n = len(nodes)
+        grid = np.stack(np.meshgrid(nodes, nodes, nodes, indexing="ij"), -1)
+        img = Image.fromarray(grid.reshape(1, -1, 3), "RGB")
+        tr = ImageCms.buildTransform(ImageCms.getOpenProfile(rpd_path),
+                                     ImageCms.createProfile("sRGB"),
+                                     "RGB", "RGB", renderingIntent=0)
+        out = np.asarray(ImageCms.applyTransform(img, tr), dtype=np.float32)
+        self.table = out.reshape(self.n, self.n, self.n, 3) / 255.0
+
+    def apply(self, x01, chunk_rows=256):
+        """(H, W, 3) float in [0, 1] -> sRGB float in [0, 1]."""
+        out = np.empty(x01.shape, dtype=np.float32)
+        t = self.table
+        for r0 in range(0, x01.shape[0], chunk_rows):
+            f = np.clip(x01[r0:r0 + chunk_rows], 0.0, 1.0) * (self.n - 1)
+            i = np.minimum(f.astype(np.int32), self.n - 2)
+            w = f - i
+            acc = 0.0
+            for dr in (0, 1):
+                wr = w[..., 0] if dr else 1.0 - w[..., 0]
+                for dg in (0, 1):
+                    wg = w[..., 1] if dg else 1.0 - w[..., 1]
+                    for db in (0, 1):
+                        wb = w[..., 2] if db else 1.0 - w[..., 2]
+                        acc = acc + (wr * wg * wb)[..., None] * t[
+                            i[..., 0] + dr, i[..., 1] + dg, i[..., 2] + db]
+            out[r0:r0 + chunk_rows] = acc
+        return out
+
+
+OEM_BALANCE = 0.5   # default roll-balance strength
+
+
+def oem_roll_balance(rgb16, negmat, lut, strength=OEM_BALANCE):
+    """Roll-level two-point balance, a stand-in for the OEM's Ansel roll
+    balance (its SCP stage is a per-channel affine LUT). Per channel, in RPD:
+    the film base (the clearest film, measure_dmin) stays where it is, and the
+    roll's picture median moves `strength` of the way to the neutral mean of
+    the three medians; tones between are scaled linearly, so a channel's
+    contrast changes but black does not move. Returns (gain, offset), applied
+    as rpd * gain + offset. Measured once on the whole ribbon (downsampled is
+    fine). Picture pixels: the darkest 20% (clear film, rebate) and clipped
+    pixels are left out.
+
+    Chosen by eye on two rolls (serial 3054, 2026-10-09): a plain offset left
+    blue shadows; making the film base neutral too pushed one roll blue and
+    the other cream (rpd.pf seems to expect an unbalanced base), so the black
+    point is left alone; half strength for the midtone."""
+    p = oem_rpd(rgb16, negmat, lut).reshape(-1, 3)
+    lum = p.mean(axis=1)
+    keep = (lum > np.percentile(lum, 20)) & (p.max(axis=1) < 4000)
+    if keep.sum() < 100:
+        return np.ones(3, np.float32), np.zeros(3, np.float32)
+    med = np.median(p[keep], axis=0)
+    base = oem_rpd(measure_dmin(rgb16).reshape(1, 1, 3).astype(np.uint16),
+                   negmat, lut)[0, 0]
+    target = med + strength * (med.mean() - med)
+    gain = (target - base) / np.maximum(med - base, 100.0)
+    return gain.astype(np.float32), (base * (1.0 - gain)).astype(np.float32)
+
+
+def render_oem(rgb16, negmat, lut, rpd_lut, balance=None):
+    """Raw 16-bit RGB frame -> OEM-path positive, 16-bit sRGB. `balance` is
+    the (gain, offset) pair from oem_roll_balance (None = none)."""
+    rpd = oem_rpd(rgb16, negmat, lut)
+    if balance is not None:
+        rpd = np.clip(rpd * balance[0] + balance[1], 0.0, 4095.0)
+    srgb = rpd_lut.apply(rpd / 4095.0)
+    return np.clip(srgb * 65535.0 + 0.5, 0.0, 65535.0).astype(np.uint16)
+
+
 def render_jpeg(rgb16_srgb, rpd_path, gamma=1.5, lo_p=0.5, hi_p=99.7, knee=0.85):
     """Render the OEM "vibrant JPEG" look from our sRGB-encoded C-41 positive.
 
@@ -725,6 +845,15 @@ def main():
                                          "profiles", "rpd.pf"),
                     help="path to Kodak rpd.pf ICC profile (default repo "
                          "profiles/rpd.pf; extract from the OEM install)")
+    ap.add_argument("--eeprom-dir", default=None,
+                    help="EEPROM archive of the scanner that made the raw "
+                         "(tools/pakon_eeprom.py backup). With --invert-c41, "
+                         "inverts through the OEM F-135 colour path: density "
+                         "LUT -> the unit's NegMatrix -> rpd.pf (TIFF and JPEG)")
+    ap.add_argument("--oem-balance", type=float, default=0.5,
+                    help="with --eeprom-dir: roll-balance strength, 0 = none, "
+                         "1 = roll picture median fully neutral; the film base "
+                         "is never moved (default 0.5)")
     ap.add_argument("--jpeg-gamma", type=float, default=1.5,
                     help="midtone lift for the JPEG render (default 1.5)")
     ap.add_argument("--jpeg-quality", type=int, default=92,
@@ -742,7 +871,9 @@ def main():
             sys.exit("--resample-to must be WxH, e.g. 3000x2000")
 
     rpd_path = os.path.abspath(args.rpd_profile)
-    if args.jpeg:
+    if args.eeprom_dir and not args.invert_c41:
+        sys.exit("--eeprom-dir requires --invert-c41")
+    if args.jpeg or args.eeprom_dir:
         if not args.invert_c41:
             sys.exit("--jpeg requires --invert-c41 (it renders the inverted positive)")
         if not os.path.exists(rpd_path):
@@ -846,7 +977,17 @@ def main():
     # OEM C-41 inversion: measure the film base (Dmin) once on the whole ribbon
     # so every frame inverts against the same white point, then apply per-frame.
     c41 = None
-    if args.invert_c41:
+    oem = None
+    if args.invert_c41 and args.eeprom_dir:
+        negmat, lut = load_neg_matrix(args.eeprom_dir), _c41_lut()
+        step = max(1, rgb.shape[0] // 4000)
+        bal = oem_roll_balance(np.asarray(rgb[::step, ::4]), negmat, lut,
+                               args.oem_balance)
+        oem = (negmat, lut, RpdLut(rpd_path), bal)
+        print(f"C-41 invert: OEM colour path (NegMatrix from {args.eeprom_dir}, "
+              f"rpd.pf), roll balance {args.oem_balance:g}: RPD gains "
+              f"{np.round(bal[0], 3).tolist()}")
+    elif args.invert_c41:
         base = measure_dmin(rgb, pct=args.c41_dmin_pct)
         c41 = (base, _c41_lut())
         print(f"C-41 invert: Dmin (film base) R,G,B = "
@@ -878,7 +1019,9 @@ def main():
             r_end = min(rgb.shape[0], r_start + frame_w)
             r_start = max(0, r_end - frame_w)
         part = rgb[r_start:r_end]
-        if c41 is not None:
+        if oem is not None:
+            part = render_oem(part, *oem)
+        elif c41 is not None:
             part = invert_c41(part, c41[0], c41[1], matrix=args.c41_matrix,
                               wb=args.c41_wb, srgb=not args.c41_no_srgb)
         if rot:
@@ -891,17 +1034,20 @@ def main():
         h_out = resize[1] if resize else part.shape[0]
         print(f"wrote {tif}  ({w_out}x{h_out}, 16-bit RGB"
               f"{' resampled' if resize else ''}"
-              f"{' C-41 positive' if c41 is not None else (' inverted' if args.invert else ' raw/negative')})")
+              f"{' C-41 positive' if (c41 or oem) is not None else (' inverted' if args.invert else ' raw/negative')})")
         if args.jpeg:
             from PIL import Image
-            rendered = render_jpeg(part, rpd_path, gamma=args.jpeg_gamma)
+            # The OEM-path TIFF is already rendered through rpd.pf.
+            rendered = ((part >> 8).astype(np.uint8) if oem is not None
+                        else render_jpeg(part, rpd_path, gamma=args.jpeg_gamma))
             im = Image.fromarray(rendered, "RGB")
             if resize:
                 im = im.resize(resize, Image.LANCZOS)
             jpg = f"{args.out}{suffix}.jpg"
             im.save(jpg, quality=args.jpeg_quality)
             print(f"wrote {jpg}  ({im.width}x{im.height}, rendered JPEG: "
-                  f"RPD profile + scene-balance + highlight roll-off)")
+                  + ("OEM colour path)" if oem is not None else
+                     "RPD profile + scene-balance + highlight roll-off)"))
 
 
 if __name__ == "__main__":
