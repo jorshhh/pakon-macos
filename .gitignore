@@ -46,3 +46,7 @@ scratch/
 
 # packaged Ghost theme (npm run zip in website/theme/pakon)
 /website/dist/
+
+# Mac app build (packaging/macos/build.sh)
+/dist/
+/packaging/macos/.cache/
