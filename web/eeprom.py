@@ -23,7 +23,10 @@ from datetime import datetime
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
-ROOT = _REPO / "backups" / "eeprom"
+# PAKON_DATA moves the archives out of the repo, e.g. the Mac app, whose
+# bundle is read-only, uses ~/Library/Application Support/Pakon.
+ROOT = (Path(os.environ["PAKON_DATA"]).expanduser() / "eeprom"
+        if os.environ.get("PAKON_DATA") else _REPO / "backups" / "eeprom")
 _PRIMARY = "eeprom_0x52_sectionA_primary.bin"
 
 _lock = threading.Lock()
