@@ -29,7 +29,7 @@ Both models scan end to end on hardware by replaying captures:
 | EEPROM read (`0xA4`/`0xA9`) | `tools/pakon_eeprom.py backup` (all four copies, validated on serial 3054); decoded in C by `pakon_eeprom` | yes |
 | Setup / configure | built in code (`pakon_setup`), both models; run on the F-135 | yes (F-135) |
 | Light calibration | built in code (`--light-cal`), F-135 | yes (F-135) |
-| Scan | `--scan-code` (F-135, Base 16 + IR): nothing replayed, whole strip, 2026-10-09; replay modes `--scan`/`--scan-sm` remain | yes (F-135) |
+| Scan | `--scan-code` (F-135, Base 16 + IR, on `main`): nothing replayed, whole strip, 2026-10-09; `--base 4\|8` parked on branch `feat/scan-base` (calibration regression, see "Resolution"); replay modes `--scan`/`--scan-sm` remain | Base 16 (F-135) |
 | Teardown | built in code; stops the motor on the F-135 (2026-10-09); the replay modes still replay the captured tail | yes (F-135) |
 | Film advance / eject | F-135: `--advance-code`, `--eject` (DX sensors), in code; F-135+: timed `--advance` (captured speed) | yes (F-135) |
 | Decode (`tools/pakon_image.py`) | independent; row layout auto-detected per raw | yes |
@@ -209,8 +209,18 @@ slide. Both change the scan itself, not just the decode.
 (EEPROM), integration time (`TLB.dll` table; F-135: Base 4/8/16 =
 `0x913`/`0xD9D`/`0xFF0`, with IR `0x60D`/`0x913`/`0xC1A`), LED period
 (integration × 0.6), dual-tap at Base 4, and the `0x91` trigger.
-`--scan-code` is Base 16 + IR only. The `0x91` value is inferred
-(2026-10-09), not yet tested:
+**Parked on branch `feat/scan-base` (2026-10-13), not merged:** `--scan-code
+--base 4|8|16` (F-135, IR on; `pakon_setup_mode`). It has a calibration
+regression on hardware, written up under "Hardware test" below; fix that
+first. The per-base table in `TLB.dll`
+(FUN_10011a60) is shared by both models, and FN_bSetF135 overrides only the
+integration times, so the F-135 also gets Base 8 = 1500 px out of a 2000 px
+window with LOW `0x89` = 1, and Base 4 = dual-tap, 1000 px. Light
+calibration measures the line width from the open-gate data
+(`pakon_lc_find_line_px`) instead of assuming the window, and scales the
+black pixels and scan window with it; the scan's `.flat.json` records the
+row layout for the decoder (F-135 Base 8 + IR rows are 6000 samples, like
+F-135+ Base 16). The `0x91` value is inferred (2026-10-09), not yet tested:
 
 - Rule: `0x91` = K × line pitch × (0.01, or 0.005 with IR) ÷ integration
   time; line pitch relative to Base 16 is 1 / 4/3 / 2 for Base 16 / 8 / 4
@@ -228,11 +238,47 @@ slide. Both change the scan itself, not just the decode.
   | Base 4 | 85 | 84.1–85.3 | 85 (84 possible) |
   | Base 4 + IR | 64 | 63.1–64.0 | 64 |
 
-- To do: `--scan-code --base 4|8|16`; scan one strip at each base and check
-  the frame proportions (3:2) — a wrong `0x91` stretches the image ~3%, so
-  it also settles Base 8 (37 vs 38). Check the F-135 line layout at Base 8/4
-  from the data (the F-135+ narrows to 1500 / 1000 px, dual-tap at Base 4).
+- To do on hardware: scan one strip at Base 8 and Base 4 and check the
+  frame proportions (3:2) — a wrong `0x91` stretches the image ~3%. Check the
+  `calibration line:` output (expected ~1528 px at Base 8, the window at
+  Base 4) and that the decoder applies the scan's flat field. Base 8 vs 37/38
+  only matters with IR off, which `--scan-code` does not use on the F-135.
   Low risk: `0x91` only sets the line rate.
+
+**Hardware test, 2026-10-13 (serial 3054, branch `feat/scan-base`).**
+
+- Base 4 setup and calibration work: window 3..1021, measured calibration
+  line 1018 px (= the window, so the F-135 does output the dual-tap
+  1000 px line), dark offsets -38/-31/-31, currents R2 G3 B3 IR2, duties
+  converged (period 929).
+- Base 4 scan: from the motor start the whole stream read black (~300
+  counts, IR too; max 416), before and through the film. End of roll waits
+  for open-gate white, so the loop never stopped; killed and torn down with
+  `--setup --teardown` (motor stopped, clean). Probably the same fault as
+  below, so the Base 4 trigger (64) is still untested.
+- **Regression:** `--light-cal` at Base 16 fails with the branch build, 4 of
+  4 runs, at the dark-table step ("no light to align lines on", table read
+  2), and passes with the `main` build, 4 of 4 (cold and warm, run in
+  between). In each failing run LOW raises event status `0x42` (0x40 is in
+  the lamp group `0x5B`; never seen in the passing runs), and from the next
+  FIFO re-arm every channel reads black although the IR LED is still
+  commanded on. Temperatures with the event are normal (lamp 40.06 °C at
+  the 40.0 °C setpoint, motherboard 28.8 °C).
+- Full packet traces (`PAKON_DEBUG=4`) of both builds send the same
+  commands apart from the calibration values. The first branch version
+  added one A/D write and one open-gate read before the dark loop; moving
+  the line-width measurement into the first dark read (no extra traffic)
+  did not fix it. Left: timing — the branch spends ~0.33 s (Debug build) in
+  `pakon_lc_find_line_px` with acquire on and nobody reading the FIFO or
+  servicing events.
+- Next: measure the line width only at Base 8 (Base 16/4 = the window) and
+  rerun `--light-cal` at Base 16; if it passes, timing is the cause and Base
+  8 must measure without stalling the event service. If it still fails,
+  read LOW `0x83` (lamp flags) on the `0x40` event and compare the two
+  builds' host-side behaviour. Then: Base 4 `--light-cal`, Base 4 scan.
+- Also seen: with stdout redirected to a file the progress lines are
+  block-buffered (the "feed the film" line is flushed, the rest lags), and
+  the `--scan-code` image loop does not catch Ctrl-C.
 
 **Film type.** Scan side: the scan LED duties are the calibrated duties ×
 10^density, with `TLB.dll`'s film-base densities (R/G/B/IR): colour negative

@@ -174,10 +174,13 @@ F-135+):
 | lowest, no IR | 3000 | 1000 |
 | lowest, IR on | 4000 | 1000 |
 | highest, IR on | 8000 | 2000 (our F-135 captures; unmeasured on the F-135+) |
+| medium, IR on | 6000 | 1500 (F-135 `--scan-code --base 8`, expected, not yet scanned) |
 
-`--linewidth` defaults to 8000 (our captures); pass the stride for other modes,
-with `--no-ir-lane` when the row has no IR block. The web UI detects the
-layout per raw (`detect_row_layout`).
+`--linewidth` defaults to the layout `pakon_replay --scan-code` records in
+`RAW.flat.json` (`row_samples`, `ir_lane`), else 8000; pass the stride for
+other raws, with `--no-ir-lane` when the row has no IR block. The web UI uses
+the recorded layout, else detects it per raw (`detect_row_layout`). The
+stride alone cannot tell F-135 Base 8 + IR from F-135+ Base 16 (both 6000).
 The older "per-zone channel order", "B,R,G" and "IR band mid-line / wrap-order"
 models were artefacts of a floating row phase and are superseded (commit
 `7474ea9`).

@@ -75,21 +75,58 @@ int main(void)
         uint16_t *s = malloc(LINES * L * sizeof *s);
         for (size_t i = 0; i < LINES * L; i++)
             s[i] = line[(START + i) % L];
-        long o = pakon_lc_find_origin(s, LINES * L, PX, 3000);
+        long o = pakon_lc_find_origin(s, LINES * L, PX, 20, 3000);
         snprintf(msg, sizeof msg, "origin found at %ld (expect %d)", o, L - START);
         CHECK(o == L - START, msg);
         for (size_t i = 0; i < L; i++)   /* IR block only: still aligns */
             line[i] = (uint16_t)(i >= 3 * PX && i - 3 * PX >= 20 ? 40000 : 300);
         for (size_t i = 0; i < LINES * L; i++)
             s[i] = line[(START + i) % L];
-        CHECK(pakon_lc_find_origin(s, LINES * L, PX, 3000) == L - START,
+        CHECK(pakon_lc_find_origin(s, LINES * L, PX, 20, 3000) == L - START,
               "origin found from the IR block alone");
         for (size_t i = 0; i < LINES * L; i++)
             s[i] = 300;
-        CHECK(pakon_lc_find_origin(s, LINES * L, PX, 3000) == -1,
+        CHECK(pakon_lc_find_origin(s, LINES * L, PX, 20, 3000) == -1,
               "no light: no origin");
         free(s);
         free(line);
+    }
+
+    /* Line width: identical lines of PX pixels (black, lit ramp, IR block),
+     * read from an arbitrary start, found among widths 5/8 W .. W. */
+    {
+        const size_t pxs[3] = { 2037, 1528, 1027 };   /* Base 16, 8, 4 shapes */
+        const size_t win[3] = { 2037, 2037, 1027 };   /* register window */
+        /* k = 3..5: the same widths with only the IR LED lit, as in the
+         * dark-offset step where calibration measures the width. */
+        for (int k = 0; k < 6; k++) {
+            size_t PX = pxs[k % 3], L = 4 * PX, LINES = 400000 / L;
+            uint16_t *line = malloc(L * sizeof *line);
+            for (size_t i = 0; i < L; i++) {
+                int ir = i >= 3 * PX;
+                size_t p = ir ? i - 3 * PX : i / 3;
+                double lit = p < 15 || (k >= 3 && !ir) ? 300 :
+                             300 + 600.0 * (double)(p < 100 ? p : 100) *
+                             (ir ? 0.6 : 1.0) + 20.0 * (double)(p % 37);
+                line[i] = (uint16_t)lit;
+            }
+            uint16_t *s = malloc(LINES * L * sizeof *s);
+            unsigned seed = 12345;
+            for (size_t i = 0; i < LINES * L; i++) {
+                seed = seed * 1103515245u + 12345u;
+                s[i] = (uint16_t)(line[(777 + i) % L] + (seed >> 16) % 101);
+            }
+            size_t got = pakon_lc_find_line_px(s, LINES * L, win[k % 3] * 5 / 8,
+                                               win[k % 3] + 8);
+            snprintf(msg, sizeof msg, "line width %zu found%s (got %zu)", PX,
+                     k >= 3 ? ", IR LED only" : "", got);
+            CHECK(got == PX, msg);
+            free(s);
+            free(line);
+        }
+        uint16_t few[100] = { 0 };
+        CHECK(pakon_lc_find_line_px(few, 100, 10, 20) == 0,
+              "line width: too few lines refused");
     }
 
     /* Dark offset. */

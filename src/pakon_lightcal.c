@@ -8,11 +8,11 @@
 #include <string.h>
 
 long pakon_lc_find_origin(const uint16_t *s, size_t nsamples, size_t line_px,
-                          double min_contrast)
+                          size_t black_px, double min_contrast)
 {
-    size_t L = 4 * line_px;
+    size_t L = 4 * line_px, b = black_px;
     size_t lines = L ? nsamples / L : 0;
-    if (!s || line_px < 120 || lines < 2)
+    if (!s || !b || line_px < 6 * b || lines < 2)
         return -1;
     if (lines > 64)
         lines = 64;
@@ -37,8 +37,8 @@ long pakon_lc_find_origin(const uint16_t *s, size_t nsamples, size_t line_px,
     for (size_t o = 0; o < L; o++) {
         /* Whole-block active windows: a lit IR block alone cannot pass for
          * an RGB block, which is three times longer. */
-        double sc = WIN(o, 120, ir - 30) - WIN(o, 0, 60) +
-                    WIN(o, ir + 60, L - 10) - WIN(o, ir, ir + 20);
+        double sc = WIN(o, 6 * b, ir - 30) - WIN(o, 0, 3 * b) +
+                    WIN(o, ir + 3 * b, L - 10) - WIN(o, ir, ir + b);
         if (sc > best) {
             best = sc;
             arg = (long)o;
@@ -47,6 +47,42 @@ long pakon_lc_find_origin(const uint16_t *s, size_t nsamples, size_t line_px,
 #undef WIN
     free(c);
     return best >= min_contrast ? arg : -1;
+}
+
+size_t pakon_lc_find_line_px(const uint16_t *s, size_t nsamples, size_t lo,
+                             size_t hi)
+{
+    if (!s || !lo || hi < lo)
+        return 0;
+    size_t lines = nsamples / (4 * hi);
+    if (lines < 4)
+        return 0;
+    if (lines > 48)
+        lines = 48;
+    double *m = malloc(4 * hi * sizeof *m);
+    if (!m)
+        return 0;
+    double best = -1;
+    size_t arg = 0;
+    for (size_t px = lo; px <= hi; px++) {
+        size_t L = 4 * px;
+        memset(m, 0, L * sizeof *m);
+        for (size_t l = 0; l < lines; l++)
+            for (size_t i = 0; i < L; i++)
+                m[i] += s[l * L + i];
+        double sum = 0, sq = 0;
+        for (size_t i = 0; i < L; i++) {
+            sum += m[i];
+            sq += m[i] * m[i];
+        }
+        double var = sq / (double)L - (sum / (double)L) * (sum / (double)L);
+        if (var > best) {
+            best = var;
+            arg = px;
+        }
+    }
+    free(m);
+    return arg;
 }
 
 int pakon_lc_stats_range(const uint16_t *s, size_t nsamples, size_t line_px,

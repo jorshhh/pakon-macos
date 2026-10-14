@@ -26,6 +26,7 @@ if str(_TOOLS) not in sys.path:
 
 from pakon_image import (  # noqa: E402
     detect_row_layout,
+    flat_row_layout,
     find_frame_grid,
     invert_c41,
     marker_align,
@@ -162,7 +163,9 @@ def _build_ribbon(raw_path, emit):
         has_ir = (_IR_LANE_OVERRIDE != "0") if _IR_LANE_OVERRIDE is not None \
             else (lw == 8000)
     else:
-        layout = detect_row_layout(raw)
+        # pakon_replay --scan-code records the layout next to the raw; the
+        # stride alone is ambiguous (F-135 Base 8 + IR = F-135+ Base 16 = 6000).
+        layout = flat_row_layout(str(raw_path)) or detect_row_layout(raw)
         if layout is None:
             raise ValueError(
                 "could not detect the row layout of this raw (no known stride "
@@ -189,7 +192,7 @@ def _build_ribbon(raw_path, emit):
     # own RAW.flat.json, else the unit's flatfield.json from --light-cal.
     # PAKON_FLAT=0 turns it off.
     flat_path = (None if os.environ.get("PAKON_FLAT", "1") == "0"
-                 else find_flat_field(str(raw_path), find_eeprom_dir()))
+                 else find_flat_field(str(raw_path), find_eeprom_dir(), width))
     if flat_path:
         try:
             apply_flat_field(rgb, load_flat_field(flat_path, width))

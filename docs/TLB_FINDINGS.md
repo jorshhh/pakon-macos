@@ -72,6 +72,7 @@ Reply status 3/6/9 and flags 0x01/0x10 -> retry; 1/2/4/5/7 hard error; 0/8 OK.
 - run speed = MotorSpeed(_Ir) * MotorAdjust(/_Ir/Drag/Drag_Ir)/1000, adjust clamp 900-1100 (EEPROM section B: 3 bases x 4)
 - speed clamps: base 400-9500, Plus 1000-32766
 - UNRESOLVED: A, B (DPI+0x60/+0x68); why base F-135 capture sends 0x0010
+- Per-base table FUN_10011a60 (DpiBase4/8/16_35), built for both models; FN_bSetF135 (FUN_10011510 -> FUN_10010760 per base) overrides only the integration times, so the rest applies to the F-135 too [C]: dpi+0x64 height (1000 / 2000 / 2000 at Base 4 / 8 / 16), +0x68 output width (1000 / 1500 / 2000), +0x8c dual-tap (Base 4), +0x90 LOW 0x89 flag (Base 8), +0x6c lines per frame (1500 / 2250 / 3000)
 
 ### End of film: decided on the host from pixels; no scanner signal
 - each line's first word LSB must be 1, else EC_DRV_LostSync (or FifoOverflow if host status 0x02)

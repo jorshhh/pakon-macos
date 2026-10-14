@@ -71,6 +71,33 @@ typedef struct {
 void pakon_seq_init(pakon_seq *seq);
 
 /*
+ * The mode for a resolution base (4, 8 or 16) on either model, pixel window
+ * from the EEPROM Offset for that base (pakon_setup_pixel_window).
+ *
+ * TLB.dll builds one per-base table for both models (FUN_10011a60): Base 16
+ * height 2000; Base 8 height 2000, output narrowed to 1500 px, LOW 0x89 = 1;
+ * Base 4 dual-tap, height 1000. On the F-135, FN_bSetF135 (FUN_10010760)
+ * then overrides only the integration times, so the rest carries over.
+ *
+ * F-135+: the four captured modes (Base 16 / 8 / 4, Base 4 + IR).
+ * F-135: IR on only. Integration 0xC1A / 0x913 / 0x60D at Base 16 / 8 / 4
+ * (TLB.dll). Trigger 0x10 at Base 16 is captured; 28 at Base 8 and 64 at
+ * Base 4 are predicted (STATUS.md, "Resolution"), not yet tested.
+ *
+ * Returns PAKON_ERR_PARAM (mode untouched) for any other combination.
+ */
+pakon_result pakon_setup_mode(int plus, int base, int ir, uint16_t eeprom_offset,
+                              pakon_scan_mode *mode);
+
+/* Visible pixels per scan line at a base: 2000 / 1500 / 1000 at Base 16 /
+ * 8 / 4 (TLB.dll), 0 for another base. */
+unsigned pakon_setup_scan_px(int base);
+
+/* LED period for an integration time: integration * 0.6, truncated
+ * (TLB.dll; 0x0C1A gives the captured 0x742). */
+uint16_t pakon_setup_led_period(uint16_t integration);
+
+/*
  * Pixel window for calibration: start = optically black pixels (6, or 3
  * dual-tap); end = EEPROM Offset for the base + line height (2000, or 1000
  * dual-tap). Matches all five captures.

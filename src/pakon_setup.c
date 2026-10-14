@@ -96,6 +96,60 @@ void pakon_setup_pixel_window(uint16_t eeprom_offset, int dual_tap,
     *end = (uint16_t)(eeprom_offset + (dual_tap ? 1000 : 2000));
 }
 
+pakon_result pakon_setup_mode(int plus, int base, int ir, uint16_t eeprom_offset,
+                              pakon_scan_mode *mode)
+{
+    pakon_scan_mode m = { 0 };
+    if (!mode)
+        return PAKON_ERR_PARAM;
+    m.ir = ir ? 1 : 0;
+    m.dual_tap = base == 4;
+    m.low89 = base == 8;
+    if (plus) {
+        if (base == 16 && !ir) {
+            m.trigger = 0x003C;
+            m.integration = 0x0FFD;
+        } else if (base == 8 && !ir) {
+            m.trigger = 0x0075;
+            m.integration = 0x0AFD;
+        } else if (base == 4) {
+            m.trigger = ir ? 0x00C5 : 0x0107;
+            m.integration = ir ? 0x04E2 : 0x0753;
+        } else {
+            return PAKON_ERR_PARAM;
+        }
+    } else {
+        if (!ir)
+            return PAKON_ERR_PARAM;
+        if (base == 16) {
+            m.trigger = 0x0010;
+            m.integration = 0x0C1A;
+        } else if (base == 8) {
+            m.trigger = 28;
+            m.integration = 0x0913;
+        } else if (base == 4) {
+            m.trigger = 64;
+            m.integration = 0x060D;
+        } else {
+            return PAKON_ERR_PARAM;
+        }
+    }
+    pakon_setup_pixel_window(eeprom_offset, m.dual_tap, &m.pixel_start,
+                             &m.pixel_end);
+    *mode = m;
+    return PAKON_OK;
+}
+
+unsigned pakon_setup_scan_px(int base)
+{
+    return base == 16 ? 2000 : base == 8 ? 1500 : base == 4 ? 1000 : 0;
+}
+
+uint16_t pakon_setup_led_period(uint16_t integration)
+{
+    return (uint16_t)(integration * 6u / 10u);
+}
+
 pakon_result pakon_setup_init(pakon_seq *seq, uint8_t low, uint8_t scn,
                               uint16_t led_period, pakon_setup_state *state)
 {

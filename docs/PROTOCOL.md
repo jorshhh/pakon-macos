@@ -223,9 +223,9 @@ that stall, and stops.
 | `--scan FILE` | verbatim replay of a capture; fits a roll the capture's length |
 | `--scan FILE --autostop` | verbatim replay, stops at end-of-roll white, then replays the teardown |
 | `--scan-sm FILE` | replays setup to motor start, then reads with the event service; scans a whole strip (F-135) |
-| `--setup --eeprom-dir DIR [--teardown]` | code-built setup (and teardown), Base 16 |
-| `--calib-probe` / `--light-cal --eeprom-dir DIR` | static line levels / light calibration in code (F-135, open gate) |
-| `--scan-code --eeprom-dir DIR [--image OUT]` | scan with nothing replayed (F-135, Base 16 + IR); feed the film once the motor runs |
+| `--setup --eeprom-dir DIR [--base N] [--teardown]` | code-built setup (and teardown), Base 16 (default), 8 or 4 |
+| `--calib-probe` / `--light-cal --eeprom-dir DIR [--base N]` | static line levels / light calibration in code (F-135, open gate); Base 8/4 tables go to `DIR/flatfield-baseN.json` |
+| `--scan-code --eeprom-dir DIR [--base N] [--image OUT]` | scan with nothing replayed (F-135, IR on, Base 16 default; Base 8/4 not yet run); feed the film once the motor runs |
 | `advance.pakscan --steps N` | replayed advance loop; motor address probed per model (`resources/f135plus/advance.pakscan` for the Plus) |
 | `--advance [--advance-seconds N]` | timed transport run to push a strip out, standalone or after `--scan`; model-specific captured speed |
 | Ctrl-C during `--scan`/`--advance` | first press stops and replays the teardown / stop writes; the run reports failure |

@@ -30,17 +30,32 @@ extern "C" {
 
 enum { PAKON_LC_R = 0, PAKON_LC_G, PAKON_LC_B, PAKON_LC_IR, PAKON_LC_NCH };
 
-#define PAKON_LC_BLACK_PX  20u   /* fully black pixels at the start of a block */
+#define PAKON_LC_BLACK_PX  20u   /* fully black pixels at the start of a block
+                                    (Base 16; scaled with the line at Base 8 / 4) */
 
 /*
  * Line origin (start of an RGB block, 0 <= origin < 4 * line_px) of the
  * lines in `s`: the offset maximising, over the mean of up to 64 lines, the
- * contrast between each block's black pixels and the rest of that block
- * (RGB block plus IR block). Returns -1 if fewer than 2 lines or the best contrast is
- * under `min_contrast` counts (no light to align on).
+ * contrast between each block's first `black_px` pixels and the rest of that
+ * block (RGB block plus IR block). Returns -1 if fewer than 2 lines or the
+ * best contrast is under `min_contrast` counts (no light to align on).
  */
 long pakon_lc_find_origin(const uint16_t *s, size_t nsamples, size_t line_px,
-                          double min_contrast);
+                          size_t black_px, double min_contrast);
+
+/*
+ * Line width (pixels; a line is 4 * line_px samples) of a stream of identical
+ * lines, as on the open gate with the motor stopped: the width in [lo, hi]
+ * whose mean over up to 48 lines has the largest variance. At a wrong width
+ * each line slides against the last and the mean blurs. Does not need the
+ * read to start on a line. Returns 0 if fewer than 4 lines of `hi` fit.
+ *
+ * Calibration uses it because the line is not always the register window:
+ * the F-135+ narrows Base 8 to 1500 px of a 2000 px window, and how the
+ * F-135 does it is not yet measured.
+ */
+size_t pakon_lc_find_line_px(const uint16_t *s, size_t nsamples, size_t lo,
+                             size_t hi);
 
 typedef struct {
     size_t   lines;                  /* whole lines used */

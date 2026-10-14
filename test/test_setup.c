@@ -297,9 +297,11 @@ int main(int argc, char **argv)
     pakon_setup_pixel_window(30, 1, &s, &e);
     CHECK(s == 3 && e == 0x0406, "16402 Base 4 window 3..0x0406");
 
-    /* F-135 serial 3054, Base 16 + IR. */
-    m = (pakon_scan_mode){ .trigger = 0x0010, .ir = 1, .integration = 0x0C1A };
-    pakon_setup_pixel_window(43, 0, &m.pixel_start, &m.pixel_end);
+    /* Modes from pakon_setup_mode against every capture: F-135 serial 3054
+     * (Base 16 + IR, Offset 43), F-135+ serial 16402 (Offsets 60/58/30). */
+    CHECK(pakon_setup_mode(0, 16, 1, 43, &m) == PAKON_OK &&
+          m.trigger == 0x0010 && m.integration == 0x0C1A && m.ir && !m.dual_tap &&
+          !m.low89, "F-135 Base 16 + IR mode");
     check_capture(dir, "scan.pakscan", "F-135 Base 16 + IR",
                   AD_PICL, AD_PICM, PAKON_SETUP_LED_PERIOD_F135, &m, 1);
     check_capture(dir, "scan_fullroll.pakscan", "F-135 full roll",
@@ -307,27 +309,45 @@ int main(int argc, char **argv)
     check_capture(dir, "36frames.pakscan", "F-135 36 frames",
                   AD_PICL, AD_PICM, PAKON_SETUP_LED_PERIOD_F135, &m, 1);
 
-    /* F-135+ serial 16402. */
-    m = (pakon_scan_mode){ .trigger = 0x003C, .integration = 0x0FFD };
-    pakon_setup_pixel_window(60, 0, &m.pixel_start, &m.pixel_end);
+    CHECK(pakon_setup_mode(1, 16, 0, 60, &m) == PAKON_OK, "F-135+ Base 16 mode");
     check_capture(dir, "f135plus/base16.pakscan", "F-135+ Base 16",
                   AD_PICL_PLUS, AD_PICM_PLUS, PAKON_SETUP_LED_PERIOD_F135_PLUS, &m, 1);
 
-    m = (pakon_scan_mode){ .trigger = 0x0075, .integration = 0x0AFD, .low89 = 1 };
-    pakon_setup_pixel_window(58, 0, &m.pixel_start, &m.pixel_end);
+    CHECK(pakon_setup_mode(1, 8, 0, 58, &m) == PAKON_OK, "F-135+ Base 8 mode");
     check_capture(dir, "f135plus/base8.pakscan", "F-135+ Base 8",
                   AD_PICL_PLUS, AD_PICM_PLUS, PAKON_SETUP_LED_PERIOD_F135_PLUS, &m, 1);
 
-    m = (pakon_scan_mode){ .trigger = 0x0107, .dual_tap = 1, .integration = 0x0753 };
-    pakon_setup_pixel_window(30, 1, &m.pixel_start, &m.pixel_end);
+    CHECK(pakon_setup_mode(1, 4, 0, 30, &m) == PAKON_OK, "F-135+ Base 4 mode");
     check_capture(dir, "f135plus/base4.pakscan", "F-135+ Base 4",
                   AD_PICL_PLUS, AD_PICM_PLUS, PAKON_SETUP_LED_PERIOD_F135_PLUS, &m, 1);
 
-    m = (pakon_scan_mode){ .trigger = 0x00C5, .ir = 1, .dual_tap = 1,
-                           .integration = 0x04E2 };
-    pakon_setup_pixel_window(30, 1, &m.pixel_start, &m.pixel_end);
+    CHECK(pakon_setup_mode(1, 4, 1, 30, &m) == PAKON_OK, "F-135+ Base 4 + IR mode");
     check_capture(dir, "f135plus/base4_ir.pakscan", "F-135+ Base 4 + IR",
                   AD_PICL_PLUS, AD_PICM_PLUS, PAKON_SETUP_LED_PERIOD_F135_PLUS, &m, 1);
+
+    /* F-135 Base 8 / 4 + IR: TLB.dll integration, the per-base table shared
+     * with the F-135+, predicted triggers. No capture to compare with. */
+    CHECK(pakon_setup_mode(0, 8, 1, 41, &m) == PAKON_OK && m.trigger == 28 &&
+          m.integration == 0x0913 && m.low89 == 1 && !m.dual_tap &&
+          m.pixel_start == 6 && m.pixel_end == 41 + 2000, "F-135 Base 8 + IR mode");
+    CHECK(pakon_setup_mode(0, 4, 1, 21, &m) == PAKON_OK && m.trigger == 64 &&
+          m.integration == 0x060D && m.dual_tap && !m.low89 &&
+          m.pixel_start == 3 && m.pixel_end == 21 + 1000, "F-135 Base 4 + IR mode");
+    {
+        pakon_scan_mode keep = m;
+        CHECK(pakon_setup_mode(0, 16, 0, 43, &m) == PAKON_ERR_PARAM &&
+              pakon_setup_mode(1, 16, 1, 60, &m) == PAKON_ERR_PARAM &&
+              pakon_setup_mode(0, 12, 1, 43, &m) == PAKON_ERR_PARAM &&
+              !memcmp(&keep, &m, sizeof m),
+              "unknown modes refused (F-135 IR off, F-135+ Base 16 + IR, Base 12)");
+    }
+    CHECK(pakon_setup_led_period(0x0C1A) == 0x742 &&
+          pakon_setup_led_period(0x0913) == 1393 &&
+          pakon_setup_led_period(0x060D) == 929, "LED period = integration * 0.6");
+    CHECK(pakon_setup_scan_px(16) == 2000 && pakon_setup_scan_px(8) == 1500 &&
+          pakon_setup_scan_px(4) == 1000 && pakon_setup_scan_px(2) == 0,
+          "scan pixels per base");
+    pakon_setup_mode(0, 16, 1, 43, &m);
 
     /* Event service frames. */
     {

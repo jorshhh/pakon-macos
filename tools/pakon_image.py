@@ -283,15 +283,46 @@ _RAW_BLACK = 300.0   # dark level the light calibration targets
 # the tables as JSON; this applies them in the raw 16-bit domain, keeping the
 # ~300 black, so the rest of the pipeline is unchanged.
 
-def find_flat_field(raw_path, eeprom_dir=None):
+def find_flat_field(raw_path, eeprom_dir=None, width=None):
     """The flat-field file for a raw: its own `<raw>.flat.json` (written by
-    pakon_replay --scan-code), else `<eeprom_dir>/flatfield.json` (written by
-    pakon_replay --light-cal). None if neither exists."""
-    for p in ([f"{raw_path}.flat.json"] +
-              ([os.path.join(str(eeprom_dir), "flatfield.json")] if eeprom_dir else [])):
-        if os.path.isfile(p):
+    pakon_replay --scan-code), else `<eeprom_dir>/flatfield.json` or
+    `flatfield-base{8,4}.json` (pakon_replay --light-cal [--base N]). With
+    `width`, an EEPROM-dir file is taken only if it covers that many scan
+    columns (each base has its own). None if nothing fits."""
+    own = f"{raw_path}.flat.json"
+    if os.path.isfile(own):
+        return own
+    if not eeprom_dir:
+        return None
+    for name in ("flatfield.json", "flatfield-base8.json", "flatfield-base4.json"):
+        p = os.path.join(str(eeprom_dir), name)
+        if not os.path.isfile(p):
+            continue
+        if width is None:
             return p
+        try:
+            import json
+            with open(p) as f:
+                ff = json.load(f)
+            if int(ff["line_px"]) - int(ff["px0"]) == width:
+                return p
+        except (OSError, ValueError, KeyError):
+            continue
     return None
+
+
+def flat_row_layout(raw_path):
+    """(row_samples, has_ir_lane) recorded by pakon_replay --scan-code in the
+    raw's own `<raw>.flat.json`, or None. Needed where the stride alone is
+    ambiguous: an F-135 Base 8 + IR row (1500 px RGB + IR) and an F-135+
+    Base 16 row (2000 px RGB) are both 6000 samples."""
+    import json
+    try:
+        with open(f"{raw_path}.flat.json") as f:
+            ff = json.load(f)
+        return int(ff["row_samples"]), bool(ff.get("ir_lane", True))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def load_flat_field(path, width):
@@ -698,7 +729,7 @@ def autocrop(rgb):
     return rgb[r0:r1 + 1, c0:c1 + 1], (r0, r1, c0, c1)
 
 
-def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
+def find_frame_grid(ribbon, n_frames=None, pitch_lo=None, pitch_hi=None):
     """Find the inter-frame boundaries on the ribbon.
 
     The frame count is ALWAYS auto-detected — never forced (a 36-exposure roll
@@ -715,8 +746,16 @@ def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
     Returns (cut_rows, pitch): the inter-frame boundary rows (gap positions)
     spanning the film, and the frame period in rows. The caller crops a fixed
     width centred in each [cut_k, cut_{k+1}] cell.
+
+    The pitch search range defaults to 2600..3800 rows at 2000 columns (Base
+    16) and scales with the width (1950..2850 at Base 8, 1300..1900 at
+    Base 4): a frame is 1.5 x the width long at every base.
     """
     rows, cols, _ = ribbon.shape
+    if pitch_lo is None:
+        pitch_lo = int(round(2600 * cols / 2000))
+    if pitch_hi is None:
+        pitch_hi = int(round(3800 * cols / 2000))
 
     # Per-row detail + brightness on the central columns (avoids edge stripes).
     step_r = max(1, rows // 8000)
@@ -829,10 +868,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("raw")
-    ap.add_argument("--linewidth", type=int, default=8000,
-                    help="samples per scan line (default 8000)")
+    ap.add_argument("--linewidth", type=int, default=None,
+                    help="samples per scan line (default: the layout in "
+                         "RAW.flat.json from pakon_replay --scan-code, else "
+                         "8000)")
     ap.add_argument("--ir-lane", action=argparse.BooleanOptionalAction,
-                    default=True,
+                    default=None,
                     help="row carries a trailing IR/extra block, so width = "
                          "linewidth/4 (F-135 8000-sample rows; F-135+ scans "
                          "with IR on). --no-ir-lane for IR-off F-135+ streams "
@@ -945,7 +986,13 @@ def main():
                      f"--rpd-profile, or place it at profiles/rpd.pf")
 
     raw = np.memmap(args.raw, dtype="<u2", mode="r")
-    lw = args.linewidth
+    layout = flat_row_layout(args.raw)
+    lw = args.linewidth or (layout[0] if layout else 8000)
+    if args.ir_lane is None:
+        args.ir_lane = layout[1] if layout and not args.linewidth else True
+    if layout and not args.linewidth:
+        print(f"row layout from {args.raw}.flat.json: {lw} samples"
+              f"{', IR lane' if args.ir_lane else ''}")
     lines = raw.size // lw
     img = raw[:lines * lw].reshape(lines, lw)
 
@@ -1025,7 +1072,7 @@ def main():
     rgb = register_zones(chans, zones, leads_per_zone, correct_seam=False,
                          zone_perms=zone_perms)  # (lines, width, 3)
     flat_path = None if args.no_flat else (
-        args.flat or find_flat_field(args.raw, args.eeprom_dir))
+        args.flat or find_flat_field(args.raw, args.eeprom_dir, width))
     if flat_path:
         try:
             apply_flat_field(rgb, load_flat_field(flat_path, width))
@@ -1073,13 +1120,17 @@ def main():
     rot = (args.rotate // 90) % 4
 
     # Auto-detected frame grid (count never forced; see find_frame_grid).
-    cut_rows, pitch = find_frame_grid(rgb, args.frames)
+    # Pitch range from the full line width (not --crop-width): 1.3..1.9 x it.
+    cut_rows, pitch = find_frame_grid(rgb, args.frames,
+                                      pitch_lo=int(round(1.3 * width)),
+                                      pitch_hi=int(round(1.9 * width)))
     fr = max(0, len(cut_rows) - 1)
-    # Trust the detected boundaries; crop a FIXED width (3000 px, capped at the
-    # pitch) centred between each pair of gaps so the leftover splits evenly as
-    # edge margin and the rebate stays off both edges. Variable per-gap trimming
-    # is unreliable, so everything is the same width.
-    frame_w = min(3000, pitch)
+    # Trust the detected boundaries; crop a FIXED width (1.5 x the line width,
+    # 3000 px at Base 16, capped at the pitch) centred between each pair of
+    # gaps so the leftover splits evenly as edge margin and the rebate stays
+    # off both edges. Variable per-gap trimming is unreliable, so everything
+    # is the same width.
+    frame_w = min(width * 3 // 2, pitch)
     if fr <= 1:
         cut_rows, fr, frame_w = [0, rgb.shape[0]], 1, None
         print("single frame")
