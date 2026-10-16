@@ -89,13 +89,12 @@ usable range is about D 3.3, while slides reach D 3.5–4):
   within 3× the darkest rows' level, runs of 80+ rows) are measured, capped at
   D 2, and `--slide-flare` (default 0.5) × (that − the D 3.5 level) is
   subtracted from the raw before the density step.
-- **Frame grid** (`slide_frame_grid`): the detail-based comb of
-  `find_frame_grid` locked onto a wrong pitch (2732) on a strip of mostly
-  dark frames, and the stray light measured at its "gaps" (picture) came out
-  35× too high. Slides now place frames from the black gaps themselves:
-  pitch = median gap spacing (~3180 rows at Base 16 on serial 3054), missing
-  gaps filled in, partial end frames kept when they hold most of a frame;
-  it falls back to `find_frame_grid` with fewer than two gaps. 0.5–0.75 looked right on
+- **Frame grid**: slides use the OEM framing (`tlx_frame_grid`, see
+  Framing below) on the uninverted profile, so the black gaps are the low
+  level, as TLB.dll does for film type 2. The earlier detail-based comb
+  locked onto a wrong pitch (2732) on a strip of mostly dark frames, and the
+  stray light measured at its "gaps" (picture) came out 35× too high.
+  Flare strength: 0.5–0.75 looked right on
   that roll (deeper, neutral shadows, detail kept); 1.0 crushed the shade.
 
 **Silver B&W** (TLB.dll film type 4) goes through the same LUT and NegMatrix
@@ -244,9 +243,10 @@ them and extrapolated at the ends. Each crop is anchored at its picture start
 and spans the full sensor width. In the web flow the detected centres only
 *seed* the interactive confirmation.
 
-`find_frame_grid` (autocorrelation pitch → phase-locked comb → fixed 3000-px
-window centred between gaps) remains the fallback for widths with no OEM
-geometry and for `--frames N`.
+A width with no OEM entry (e.g. trimmed by the CLI autocrop) takes the
+nearest resolution's geometry. `--format full|half|pano` (the web app's
+Format) scales the picture length and pitch: half frame = half of full
+[assumed], panoramic (XPan) = 5530 / 5736 rows at Base 16.
 
 ## The OEM "Ansel" cascade (the full minilab look — context)
 

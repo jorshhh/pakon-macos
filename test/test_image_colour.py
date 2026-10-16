@@ -165,9 +165,6 @@ class SlideTests(unittest.TestCase):
         # Capped at D 2: a light "gap" cannot crush the shadows.
         self.assertTrue(np.all(img.measure_slide_flare(
             rgb, 1.0, gaps=[(0, 3999)]) <= 640))
-        cuts, pitch = img.slide_frame_grid(rgb, pitch_lo=800, pitch_hi=1200)
-        self.assertEqual(pitch, 1000)
-        self.assertEqual(cuts, [0, 999, 1999, 2999, 3999])
         # Removing it darkens the deep shadows, leaves the highlights alone.
         px = np.array([[[300 + 200] * 3, [300 + 40000] * 3]], np.uint16)
         fl = img.measure_slide_flare(rgb, 1.0)

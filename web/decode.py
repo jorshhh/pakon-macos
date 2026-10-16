@@ -26,7 +26,6 @@ if str(_TOOLS) not in sys.path:
 
 from pakon_image import (  # noqa: E402
     detect_row_layout,
-    find_frame_grid,
     tlx_frame_grid,
     tlx_geometry,
     FRAME_FORMATS,
@@ -43,7 +42,6 @@ from pakon_image import (  # noqa: E402
     render_slide,
     slide_path,
     measure_slide_flare,
-    slide_frame_grid,
     to_grey,
     RpdLut,
     apply_flat_field,
@@ -247,24 +245,11 @@ def prescan(raw_path, progress=None, film="c41", fmt="full") -> dict:
     base = measure_dmin(rgb, pct=99.5)
 
     emit("Detecting frames", 0.68)
-    # Box length per format (rows): the OEM geometry for this width, else
-    # multiples of the fixed 3000.
-    box_w = {f: (tlx_geometry(cols, f) or (0, int(_FRAME_W * k[0]), 0))[1]
-             for f, k in FRAME_FORMATS.items()}
-    frame_w = box_w[fmt]
-    # OEM framing (docs/TLB_FINDINGS.md "Picture framing"); for full frames
-    # the gap-centred grid when the width has no OEM geometry or it finds
-    # nothing (that grid only knows full frames).
-    tlx = tlx_frame_grid(rgb, positive=film == "slide", fmt=fmt)
-    centres = []
-    if tlx and tlx[0]:
-        starts, frame_w, pitch = tlx
-        centres = [int(s + frame_w // 2) for s in starts]
-    elif fmt == "full":
-        grid = slide_frame_grid(rgb) if film == "slide" else None
-        cut_rows, pitch = grid or find_frame_grid(rgb)
-        centres = [int((cut_rows[i] + cut_rows[i + 1]) // 2)
-                   for i in range(len(cut_rows) - 1)]
+    # Box length per format (rows) for this resolution.
+    box_w = {f: tlx_geometry(cols, f)[1] for f in FRAME_FORMATS}
+    # OEM framing (docs/TLB_FINDINGS.md "Picture framing").
+    starts, frame_w, pitch = tlx_frame_grid(rgb, positive=film == "slide", fmt=fmt)
+    centres = [int(s + frame_w // 2) for s in starts]
     if not centres:                       # fallback: single image
         centres = [rows // 2]
         pitch = rows

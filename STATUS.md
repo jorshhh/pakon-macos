@@ -285,7 +285,8 @@ NegMatrix then grey.
   Second strip 2026-10-15: clean scan, but the detail-based frame grid
   missed the gaps (pitch 2732) and the stray light measured at its cuts
   crushed the shadows; slides now frame from the black gaps
-  (`slide_frame_grid`, pitch ~3180 on all three raws) and measure stray light
+  (pitch ~3180 on all three raws; now the OEM framing, `tlx_frame_grid`)
+  and measure stray light
   on the gap rows, capped at D 2. Still to do: slide orientation
   (`--rotate 90` comes out wrong).
 - Left: B&W C-41 (0.10/0.25/0.25/0.08).

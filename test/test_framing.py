@@ -50,7 +50,7 @@ class TlxFramingTests(unittest.TestCase):
         self.assertEqual(img.tlx_geometry(2000, "half"), (8, 1500, 1603))
         self.assertEqual(img.tlx_geometry(2000, "pano"), (8, 5530, 5736))  # XPanPreScan.au3
         self.assertEqual(img.tlx_geometry(1500, "pano"), (6, 4148, 4303))
-        self.assertIsNone(img.tlx_geometry(1234, "half"))
+        self.assertEqual(img.tlx_geometry(1998), (8, 3000, 3206))   # trimmed: nearest
 
     def test_half_and_pano_strips(self):
         # Every picture found, within one block, only with the roll's format.
@@ -71,8 +71,17 @@ class TlxFramingTests(unittest.TestCase):
             full = img.tlx_frame_grid(rgb)[0]
             self.assertNotEqual(len(full), n, fmt)
 
-    def test_unknown_width(self):
-        self.assertIsNone(img.tlx_frame_grid(np.zeros((100, 1234, 3), np.uint16)))
+    def test_slide_gaps(self):
+        # Slides: black gaps, framed on the positive (uninverted) profile.
+        block, length, pitch = img.TLX_GEOMETRY[2000]
+        rgb = np.full((pitch * 5 + 2000, 2000, 3), 1000, np.uint16)
+        for k in range(5):
+            s = 1000 + k * pitch
+            rgb[s:s + length] = 40000
+        starts, _, _ = img.tlx_frame_grid(rgb, positive=True)
+        self.assertEqual(len(starts), 5)
+        for k, s in enumerate(starts):
+            self.assertLessEqual(abs(s - (1000 + k * pitch)), block)
 
 
 if __name__ == "__main__":

@@ -177,4 +177,4 @@ Gain_R/G/B, Offset_R/G/B, Current_R/G/B/Ir, DutyCycle_* (film), DutyCycleOpenGat
   3. LookAtEnd / LookAtBeginning (FUN_10006ae0 / FUN_10006ca0): step one pitch outward; FN_iFramingEstimatePlacement (FUN_100064e0) slides a picture-long window across a (pitch - picture)-wide range and keeps the offset with the most ones (ties: nearest the centre). Stops when FUN_10006630 finds no film.
   4. Nothing found -> FramingBlindlyPlacePictures (FUN_10006720): a pitch grid from (pitch - picture)/2.
 - With DX enabled (+0xca4) each picture must also agree with the DX frame-number positions (FUN_10006310).
-- Prototype check (scratch, scan-code-2.raw, Base 16): 5 "nice" pictures, starts 3176–3296 apart, every crop between the gaps. Our find_frame_grid locked a 3606 pitch, found 4 frames, and its crops straddle the gaps.
+- Prototype check (scratch, scan-code-2.raw, Base 16): 5 "nice" pictures, starts 3176–3296 apart, every crop between the gaps. The former find_frame_grid (since removed) locked a 3606 pitch, found 4 frames, and its crops straddle the gaps.
