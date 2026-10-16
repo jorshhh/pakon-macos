@@ -874,8 +874,8 @@ TLX_GEOMETRY = {2000: (8, 3000, 3206), 1500: (6, 2250, 2405), 1000: (4, 1500, 16
 
 # Picture formats: (length, pitch) as a fraction of the full-frame values.
 # TLX has no presets for these; its operator types Width / UnitWidth into
-# "Pre-Scan Framing Adjust". Panoramic (XPan) is 5530 / 5736 at Base 16
-# (pakon-scanning-software XPanPreScan.au3); half frame is half a full frame
+# "Pre-Scan Framing Adjust". Panoramic (XPan) is the Width 5530 / UnitWidth
+# 5736 XPan users enter there at Base 16; half frame is half a full frame
 # [assumed, not yet checked on a real roll].
 FRAME_FORMATS = {
     "full": (1.0, 1.0),

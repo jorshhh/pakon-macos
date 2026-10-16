@@ -25,8 +25,9 @@ class TlxFramingTests(unittest.TestCase):
             self.assertEqual(length * 2 // 3, width)          # 3:2
 
     def test_real_strip_profile(self):
-        # scan-code-2.raw (Base 16, serial 3054): 5 pictures between the gaps.
-        prof = np.load(ROOT / "test/fixtures/framing/scan_code_2_profile.npy")
+        # Block profile of a real 5-frame Base 16 colour-negative strip: all 5
+        # pictures, each between the gaps.
+        prof = np.load(ROOT / "test/fixtures/framing/base16_c41_5frame_profile.npy")
         starts = img.tlx_place(prof.astype(np.int32), 375, 400)
         self.assertEqual(starts, [1439, 1836, 2234, 2646, 3048])
 
@@ -48,7 +49,7 @@ class TlxFramingTests(unittest.TestCase):
     def test_format_geometry(self):
         self.assertEqual(img.tlx_geometry(2000, "full"), (8, 3000, 3206))
         self.assertEqual(img.tlx_geometry(2000, "half"), (8, 1500, 1603))
-        self.assertEqual(img.tlx_geometry(2000, "pano"), (8, 5530, 5736))  # XPanPreScan.au3
+        self.assertEqual(img.tlx_geometry(2000, "pano"), (8, 5530, 5736))  # TLX XPan Width / UnitWidth
         self.assertEqual(img.tlx_geometry(1500, "pano"), (6, 4148, 4303))
         self.assertEqual(img.tlx_geometry(1998), (8, 3000, 3206))   # trimmed: nearest
 
