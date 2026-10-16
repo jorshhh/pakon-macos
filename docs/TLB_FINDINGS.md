@@ -156,3 +156,25 @@ Gain_R/G/B, Offset_R/G/B, Current_R/G/B/Ir, DutyCycle_* (film), DutyCycleOpenGat
 - ColRevLut1.pf: KCMS 'link' class, "Pakon CMY to ROMM12", A2B0 mft2 3->3, grid 31, 511 input entries, 2 output entries (identity).
 - FindCorrections (FUN_10021590) refuses film type 2 (error 0x1b/0xf), so calibration runs under another type; the scan uses the "other" densities (FUN_10020230).
 - The Ansel balance call (DAT_10075544+100, flag 0x20) runs for every type; its mode word is 1 when the film type is odd (only colour neg, type 1) and 4 otherwise (positive 2, silver B&W 4, B&W C-41 8).
+
+### Picture framing (FN_iFramePictures 0x100079c0) [C] (2026-10-16)
+- Geometry is fixed per resolution (FUN_10011a60, the per-base object; FN_bSetF135 sets the rest):
+
+  | Base | block (lines) | picture (lines) | pitch (lines) | width (px) |
+  |------|---------------|-----------------|---------------|------------|
+  | 16   | 8 | 3000 (+0x6c) | 3206 (+0x70) | 2000 (+0x68) |
+  | 8    | 6 | 2250 | 2405 | 1500 |
+  | 4    | 4 | 1500 | 1603 | 1000 |
+
+  Every picture is 375 blocks; pitch is ~400 blocks at every base.
+- Output rect (default branch): rows = block*start + 0 .. +picture-1, cols 0 .. width-1 (full sensor width). The crop is anchored at the detected picture start, never centred between gaps.
+- Profile (FUN_10006870): one value per block = 8-bit (R+G+B)/3 of the low-res line, inverted (255-v) for every film type except type 2 (positive). The gap (clear base) is low and the picture is high.
+- Threshold (FUN_10005d20, mode 0): 256-bin histogram; walk up from bin 0 to the first peak (stop once a bin is < 3/5 of a peak holding > n/150 samples). lo = walk down while bin >= peak/20; hi = walk up (<= 50 bins) while bin >= peak/10. If (peak-lo)*4 < hi-peak, threshold = first bin above the peak < peak/2; else hi + (hi-peak)/2. ones = profile > threshold.
+- Sweep (FN_iFramePicturesSub 0x100072c0): move the threshold +2 then -2 while the count of runs with 95% < length < 115% of picture does not drop; keep the best. Logs "Framing Ones".
+- Placement (FN_iFramingFindPictures 0x10006e70), slots = start*2/pitch:
+  1. LookForNicePictures (FUN_10006930): a run of 95–115% of picture -> start = run start + (run length - picture)/3. A run of 95–115% of picture + pitch (missing gap) -> two pictures: run start + (len - pitch - picture)/3 and run start + pitch.
+  2. LookInBetweenEnds (FUN_100063d0): between two found pictures, fill n-1 evenly spaced pictures, n = span/pitch (minus 1 if the remainder is < pitch/4).
+  3. LookAtEnd / LookAtBeginning (FUN_10006ae0 / FUN_10006ca0): step one pitch outward; FN_iFramingEstimatePlacement (FUN_100064e0) slides a picture-long window across a (pitch - picture)-wide range and keeps the offset with the most ones (ties: nearest the centre). Stops when FUN_10006630 finds no film.
+  4. Nothing found -> FramingBlindlyPlacePictures (FUN_10006720): a pitch grid from (pitch - picture)/2.
+- With DX enabled (+0xca4) each picture must also agree with the DX frame-number positions (FUN_10006310).
+- Check on a 5-frame Base 16 colour-negative strip: 5 "nice" pictures, starts 3176–3296 apart, every crop between the gaps. The former find_frame_grid (since removed) locked a 3606 pitch, found 4 frames, and its crops straddle the gaps.

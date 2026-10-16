@@ -45,9 +45,8 @@ sanity preview only (proper negative inversion is left to dedicated tools).
 
 Use `--resample-to WxH` to correct for non-square raw pixels and get the right
 output geometry; for 35mm film at Pakon native resolution use `--resample-to
-3000x2000`. The frame splitting (`--frames N`) uses actual inter-frame gap
-detection when N > 1, so frames land on real boundaries rather than equal
-divisions.
+3000x2000`. Frames are found the way the OEM software does it (TLB.dll
+picture framing, `tlx_frame_grid`), in the picture format `--format` names.
 
 Needs numpy and ImageMagick (`magick`). Writes a small PNG preview alongside.
 """
@@ -777,21 +776,6 @@ def dual_tap_correct(parts, seam_cols=50):
             np.clip(z1, 0, 65535).astype(np.uint16)]
 
 
-def find_ir_band(chans, full):
-    """Locate the IR (Digital ICE) band: a contiguous run of bright,
-    colour-neutral columns (R≈G≈B). Returns (ir0, ir1) in deinterleaved column
-    space, or None. Measured on a central film slice."""
-    n = chans["r"].shape[0]
-    a, b = max(0, n // 2 - 5000), n // 2 + 5000
-    sl = np.stack([chans["r"][a:b], chans["g"][a:b], chans["b"][a:b]],
-                  axis=-1).astype(np.float32)
-    col_mean = sl.mean((0, 2))
-    col_spread = sl.max(2).mean(0) - sl.min(2).mean(0)
-    ir = (col_mean > 0.35 * full) & (col_spread < 0.06 * full)
-    runs = _all_runs(ir, min_len=100)
-    return runs[0] if runs else None
-
-
 def write_tiff(rgb16, path, resize=None):
     """Write an (H,W,3) uint16 array as a 16-bit RGB TIFF via ImageMagick
     ((H,W) as a 16-bit grey TIFF). If resize=(W,H) is given, resample to
@@ -883,163 +867,162 @@ def autocrop(rgb, positive=False):
     return rgb[r0:r1 + 1, c0:c1 + 1], (r0, r1, c0, c1)
 
 
-def slide_frame_grid(ribbon, pitch_lo=2600, pitch_hi=3800):
-    """find_frame_grid for slide film: the gaps between slide frames are black
-    film (find_slide_gaps), which the detail-based comb misses (it locked onto
-    a wrong pitch on a strip of mostly dark frames). Pitch = median spacing of
-    consecutive gaps; a missing gap (spacing ~2x) is filled in; the frames
-    before the first and after the last gap are kept when there is room for
-    most of a frame. Returns (cut_rows, pitch) like find_frame_grid, or None
-    when fewer than two gaps are found (then use find_frame_grid)."""
-    rows = ribbon.shape[0]
-    gaps = [g for g in find_slide_gaps(ribbon) if g[0] > 0 and g[1] < rows - 1]
-    centres = [(a + b) // 2 for a, b in gaps]
-    diffs = np.diff(centres)
-    good = [d for d in diffs if pitch_lo <= d <= pitch_hi]
-    if len(centres) < 2 or not good:
-        return None
-    P = int(np.median(good))
-    cuts = [centres[0]]
-    for c in centres[1:]:
-        n = int(round((c - cuts[-1]) / P))
-        if n < 1:                       # a stray dark run inside a frame
-            continue
-        for j in range(1, n):           # missing gaps
-            cuts.append(cuts[-1] + (c - cuts[-1]) // (n - j + 1))
-        cuts.append(c)
-    # Leader / tail: keep a partial cell when it holds most of a frame.
-    while cuts[0] - P >= -0.45 * P and cuts[0] > 0.55 * P:
-        cuts.insert(0, max(0, cuts[0] - P))
-    while cuts[-1] + P <= rows + 0.45 * P and rows - cuts[-1] > 0.55 * P:
-        cuts.append(min(rows, cuts[-1] + P))
-    return [int(c) for c in cuts], P
+# OEM picture geometry per sensor width (TLB.dll FUN_10011a60): framing block
+# (lines), picture length (lines), pitch (lines). docs/TLB_FINDINGS.md
+# "Picture framing".
+TLX_GEOMETRY = {2000: (8, 3000, 3206), 1500: (6, 2250, 2405), 1000: (4, 1500, 1603)}
+
+# Picture formats: (length, pitch) as a fraction of the full-frame values.
+# TLX has no presets for these; its operator types Width / UnitWidth into
+# "Pre-Scan Framing Adjust". Panoramic (XPan) is the Width 5530 / UnitWidth
+# 5736 XPan users enter there at Base 16; half frame is half a full frame
+# [assumed, not yet checked on a real roll].
+FRAME_FORMATS = {
+    "full": (1.0, 1.0),
+    "half": (0.5, 0.5),
+    "pano": (5530 / 3000, 5736 / 3206),
+}
 
 
-def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
-    """Find the inter-frame boundaries on the ribbon.
+def tlx_geometry(width, fmt="full"):
+    """(block, length, pitch) in ribbon rows for a sensor width and picture
+    format. A width with no OEM entry (e.g. trimmed by autocrop) takes the
+    nearest resolution's."""
+    block, length, pitch = TLX_GEOMETRY[min(TLX_GEOMETRY, key=lambda w: abs(w - width))]
+    kl, kp = FRAME_FORMATS[fmt]
+    return block, int(round(length * kl)), int(round(pitch * kp))
 
-    The frame count is ALWAYS auto-detected — never forced (a 36-exposure roll
-    commonly scans as 37+ usable frames, and forcing a count makes the cuts drift
-    a fraction of a frame each, so the inter-frame gap creeps into the picture).
 
-    Method: (1) measure the true frame **pitch** by autocorrelation of the
-    per-row detail profile — robust to where exactly the film starts and to the
-    real count; (2) derive the count from span / pitch; (3) pick the global
-    phase that lands the regular grid in low-detail gaps; (4) **snap** each
-    interior boundary to its local detail minimum (the actual rebate) to absorb
-    film-advance jitter. `n_frames` is an optional hard override (rarely needed).
+def tlx_profile(ribbon, block, positive=False):
+    """FUN_10006870: one 8-bit (R+G+B)/3 value per block of lines, inverted
+    for negatives so the clear gap is low and the picture high."""
+    n = ribbon.shape[0] // block
+    v = ribbon[:n * block:block].astype(np.float32).mean((1, 2)) / 257.0
+    v = np.clip(v, 0, 255).astype(np.int32)
+    return v if positive else 255 - v
 
-    Returns (cut_rows, pitch): the inter-frame boundary rows (gap positions)
-    spanning the film, and the frame period in rows. The caller crops a fixed
-    width centred in each [cut_k, cut_{k+1}] cell.
-    """
-    rows, cols, _ = ribbon.shape
 
-    # Per-row detail + brightness on the central columns (avoids edge stripes).
-    step_r = max(1, rows // 8000)
-    cen0, cen1 = cols // 4, 3 * cols // 4
-    step_c = max(1, (cen1 - cen0) // 200)
-    sub = ribbon[::step_r, cen0:cen1:step_c, :].astype(np.float32)
-    detail = sub.mean(2).std(1)
-    bright = sub.mean((1, 2))
-    n = len(detail)
-
-    win = max(3, int(0.01 * n))
-    det_s = np.convolve(detail, np.ones(win) / win, mode='same')
-    dnorm = (det_s - det_s.min()) / (det_s.max() - det_s.min() + 1e-9)
-
-    # Exclude the bright pre-roll: the leading run of anomalously bright rows
-    # (open-gate white, ~2-4x the film-base median) before the film loads.
-    med = np.median(bright)
-    start = 0
-    for i in range(n):
-        if bright[i] > 1.6 * med:
-            start = i + 1
-        elif i - start > 30:
+def _tlx_threshold(prof):
+    """FUN_10005d20 mode 0: the first significant histogram peak (the gap
+    level) and a cut just above it."""
+    h = np.bincount(prof, minlength=256)
+    floor = len(prof) // 150
+    peak = pk = 0
+    for i in range(0xfa + 2):
+        if pk > floor and h[i] < pk * 3 // 5:
             break
-    end = n
-    span = end - start
+        if h[i] > pk:
+            pk, peak = int(h[i]), i
+    lo = peak
+    while lo and h[lo] >= pk // 20:
+        lo -= 1
+    hi, top = peak, min(255, peak + 50)
+    while hi < top and h[hi] >= pk // 10:
+        hi += 1
+    if (peak - lo) * 4 < hi - peak:
+        t = peak
+        while t < 255 and h[t] >= pk // 2:
+            t += 1
+        return t
+    return hi + (hi - peak) // 2
 
-    P_lo, P_hi = max(2, pitch_lo // step_r), pitch_hi // step_r
 
-    # (1) True pitch via autocorrelation of the (detrended) detail profile.
-    d = detail[start:end] - detail[start:end].mean()
-    if len(d) > P_hi:
-        ac = np.correlate(d, d, mode="full")[len(d) - 1:]
-        seg = ac[P_lo:P_hi + 1]
-        pitch0 = P_lo + int(np.argmax(seg)) if len(seg) else max(2, span // 36)
-    else:
-        pitch0 = max(2, span // max(1, (n_frames or 36)))
-    if n_frames and n_frames > 1:           # optional hard override
-        pitch0 = max(2, span // n_frames)
+def _tlx_runs(ones):
+    d = np.diff(np.concatenate([[0], ones, [0]]))
+    s, e = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    return list(zip(s.tolist(), (e - s).tolist()))
 
-    # (2) Phase-locked uniform comb. Film advance is regular, so the gaps sit at
-    # φ + k·P — fit ONE (P, φ) that lands the whole comb in low-detail gaps (use
-    # every comb tooth at once; do NOT snap cuts individually — that just chases
-    # dark-scene minima and distorts frames). Search P in a narrow band around
-    # the autocorr pitch.
-    lo = max(P_lo, int(pitch0 * 0.95))
-    hi = min(P_hi, int(pitch0 * 1.05))
-    best = None
-    for P in range(lo, hi + 1):
-        for phi in range(0, P, max(1, P // 80)):
-            pos = np.arange(start + phi, end, P)
-            if len(pos) < 2:
+
+def tlx_place(prof, plen, pitch):
+    """FN_iFramePicturesSub + FN_iFramingFindPictures on a block profile.
+    Returns picture starts in blocks (sorted), each `plen` blocks long."""
+    lo, hi = plen * 95 // 100, plen * 115 // 100
+
+    def good(t):
+        return sum(lo < l < hi for _, l in _tlx_runs(prof > t))
+
+    # Threshold sweep: +2 / -2 steps while the count of picture-length runs
+    # does not drop; keep the best.
+    t0 = _tlx_threshold(prof)
+    best_n, best_t = good(t0), t0
+    for step in (2, -2):
+        t = t0
+        while 1 <= t + step <= 0xff:
+            t += step
+            g = good(t)
+            if g < best_n:
+                break
+            if g > best_n:
+                best_n, best_t = g, t
+    ones = (prof > best_t).astype(np.int32)
+    n = len(ones)
+    pics = {}                                     # slot (half pitch) -> start
+
+    def put(p):
+        pics.setdefault(p * 2 // pitch, p)
+
+    # LookForNicePictures: whole pictures, and two pictures with a lost gap.
+    # The excess length is split 1/3 before, 2/3 after.
+    for s, l in _tlx_runs(ones):
+        if lo < l < hi:
+            put(s + (l - plen) // 3)
+        elif lo + pitch < l < hi + pitch:
+            put(s + (l - pitch - plen) // 3)
+            put(s + pitch)
+    if not pics:                                  # FramingBlindlyPlacePictures
+        off = (pitch - plen) // 2
+        return [off + k * pitch for k in range(max(0, (n - 4) // pitch))]
+
+    # LookInBetweenEnds: evenly fill the pictures missing between two found.
+    found = sorted(pics.values())
+    for a, b in zip(found, found[1:]):
+        span = b - a
+        k = span // pitch
+        if span - k * pitch < pitch // 4:
+            k -= 1
+        for j in range(1, k + 1):
+            put(a + j * span // (k + 1))
+
+    # LookAtEnd / LookAtBeginning: one pitch outward at a time; place the
+    # picture where a plen window holds the most film (FUN_100064e0), stop
+    # when there is no film left.
+    gap = max(1, pitch - plen)
+    cum = np.concatenate([[0], np.cumsum(ones)])
+
+    def estimate(start):
+        best = None
+        for k in range(gap):
+            p = start + k
+            if p < 0 or p + plen > n:
                 continue
-            score = dnorm[pos].mean()
-            if best is None or score < best[0]:
-                best = (score, P, phi)
-    if best is None:
-        return [0, rows], pitch0 * step_r
-    _, P, phi = best
+            key = (int(cum[p + plen] - cum[p]), -abs(k - gap // 2))
+            if best is None or key > best[0]:
+                best = (key, p)
+        if best is None or best[0][0] < plen // 2:
+            return None
+        return best[1]
 
-    # (3) Lock each comb tooth onto its actual gap (deepest detail dip in a small
-    # window — the comb is already close, so this won't reach distant dark-scene
-    # minima) for accurate gap positions. These boundaries are trustworthy; the
-    # caller crops a fixed width centred between them (gaps vary in width, so we
-    # do NOT try to measure each rebate — that's unreliable).
-    def snap(g):
-        w = max(2, int(0.12 * P))
-        a, b = max(0, g - w), min(n, g + w + 1)
-        return a + int(np.argmin(det_s[a:b]))
-
-    gaps = [snap(g) for g in range(start + phi, end, P) if start < g < end]
-    bounds = sorted(set([start] + gaps + [end]))
-    cells = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
-
-    # (4) Drop junk end cells: partial slivers (< 0.55·P, leader/tail fragments)
-    # and leading/trailing low-detail cells (the leader/blank produces one — a
-    # real frame carries detail; interior dark frames are kept).
-    cell_det = [float(dnorm[a:b].mean()) for a, b in cells]
-    med = float(np.median(cell_det)) if cell_det else 0.0
-    keep = [c[1] - c[0] >= 0.55 * P for c in cells]
-    for i in range(len(cells)):                       # leading
-        if keep[i] and cell_det[i] < 0.45 * med:
-            keep[i] = False
-        elif keep[i]:
-            break
-    for i in range(len(cells) - 1, -1, -1):           # trailing
-        if keep[i] and cell_det[i] < 0.45 * med:
-            keep[i] = False
-        elif keep[i]:
-            break
-    cells = [c for c, k in zip(cells, keep) if k]
-    if not cells:
-        return [0, rows], P * step_r
-
-    cut_rows = [int(cells[0][0] * step_r)] + [int(c[1] * step_r) for c in cells]
-    return cut_rows, P * step_r
+    last = max(pics.values())
+    while (q := estimate(last + plen + gap // 2)) is not None and q > last:
+        put(q)
+        last = q
+    first = min(pics.values())
+    while (q := estimate(first - pitch - gap // 2)) is not None and q < first:
+        put(q)
+        first = q
+    return sorted(set(pics.values()))
 
 
-def write_preview(rgb16, path, maxdim=1000):
-    try:
-        from PIL import Image
-    except ImportError:
-        return
-    a = rgb16
-    step = max(1, max(a.shape[0] // maxdim, a.shape[1] // maxdim))
-    a8 = (a[::step, ::step] >> 8).astype(np.uint8)
-    Image.fromarray(a8).save(path)
+def tlx_frame_grid(ribbon, positive=False, fmt="full"):
+    """OEM (TLX) framing. Returns (starts, length, pitch) in ribbon rows:
+    each picture is rows [start, start + length). `fmt` is a FRAME_FORMATS
+    key."""
+    block, length, pitch = tlx_geometry(ribbon.shape[1], fmt)
+    starts = tlx_place(tlx_profile(ribbon, block, positive),
+                       length // block, pitch // block)
+    rows = ribbon.shape[0]
+    starts = [min(max(0, s * block), max(0, rows - length)) for s in starts]
+    return sorted(set(starts)), length, pitch
 
 
 def main():
@@ -1075,8 +1058,9 @@ def main():
     ap.add_argument("--no-flat", action="store_true",
                     help="skip the per-column flat field")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
-    ap.add_argument("--frames", type=int, default=None,
-                    help="split into N frames (default: auto-detect from valley count)")
+    ap.add_argument("--format", choices=sorted(FRAME_FORMATS), default="full",
+                    help="picture format for the OEM framing: full, half (half "
+                         "frame) or pano (XPan panoramic); default full")
     ap.add_argument("--crop-width", type=int,
                     help="keep only this many px of width (drop blank overscan)")
     ap.add_argument("--autocrop", action=argparse.BooleanOptionalAction,
@@ -1311,35 +1295,23 @@ def main():
 
     rot = (args.rotate // 90) % 4
 
-    # Auto-detected frame grid (count never forced; see find_frame_grid).
-    grid = slide_frame_grid(rgb) if args.slide and not args.frames else None
-    cut_rows, pitch = grid or find_frame_grid(rgb, args.frames)
-    fr = max(0, len(cut_rows) - 1)
-    # Trust the detected boundaries; crop a FIXED width (3000 px, capped at the
-    # pitch) centred between each pair of gaps so the leftover splits evenly as
-    # edge margin and the rebate stays off both edges. Variable per-gap trimming
-    # is unreliable, so everything is the same width.
-    frame_w = min(3000, pitch)
-    if fr <= 1:
-        cut_rows, fr, frame_w = [0, rgb.shape[0]], 1, None
+    # OEM framing: fixed picture length and pitch per resolution, each crop
+    # anchored at its picture's start (docs/TLB_FINDINGS.md "Picture framing").
+    starts, frame_w, pitch = tlx_frame_grid(rgb, positive=args.slide, fmt=args.format)
+    if len(starts) <= 1:
+        starts, frame_w = [0], rgb.shape[0]
         print("single frame")
     else:
-        print(f"frame grid: pitch={pitch} rows, {fr} frames")
+        print(f"frame grid: pitch={pitch} rows, {len(starts)} frames")
     flare = None
     if slide is not None:
         flare = measure_slide_flare(rgb, args.slide_flare)
         print(f"slide flare: R,G,B {[round(float(v), 1) for v in flare]} counts "
               f"(strength {args.slide_flare:g})")
 
-    for i in range(fr):
-        if frame_w is None:
-            r_start, r_end = cut_rows[i], cut_rows[i + 1]
-        else:
-            centre = (cut_rows[i] + cut_rows[i + 1]) // 2
-            r_start = max(0, centre - frame_w // 2)
-            r_end = min(rgb.shape[0], r_start + frame_w)
-            r_start = max(0, r_end - frame_w)
-        part = rgb[r_start:r_end]
+    fr = len(starts)
+    for i, r_start in enumerate(starts):
+        part = rgb[r_start:r_start + frame_w]
         if slide is not None:
             part = render_slide(part, *slide, flare=flare)
         elif oem is not None:

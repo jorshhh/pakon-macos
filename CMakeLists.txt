@@ -87,6 +87,9 @@ if(Python3_Interpreter_FOUND)
   # Skips itself when numpy/Pillow are missing from that interpreter.
   add_test(NAME test_image_colour
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_image_colour.py)
+  # Skips itself when numpy is missing.
+  add_test(NAME test_framing
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_framing.py)
   # Skips itself when numpy/Pillow/tifffile are missing.
   add_test(NAME test_dx_metadata
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_dx_metadata.py)

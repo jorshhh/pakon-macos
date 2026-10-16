@@ -200,9 +200,10 @@ before PIC traffic flows.
 | Base 4, IR | yes | yes (`--linewidth 4000`, IR lane split correctly) | not yet |
 
 The other modes' live replays should behave like Base 16 (same protocol,
-different parameter bytes) but have not been run. Framing/cropping
-(`find_frame_grid` pitch bounds 2600–3800, fixed-3000-row crops) is tuned
-for Base 16 and needs per-resolution scaling for Base 8/4. Modes that were
+different parameter bytes) but have not been run. Framing/cropping uses
+the OEM per-resolution geometry (`tlx_frame_grid`: 3000/3206, 2250/2405,
+1500/1603 rows at Base 16/8/4); Base 8/4 framing is untested on a real
+strip. Modes that were
 never captured (e.g. Base 16 + IR) have no scripts; producing them takes
 either another Windows capture or the future driven backend composing
 commands from the per-mode parameter table above.

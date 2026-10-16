@@ -89,13 +89,12 @@ usable range is about D 3.3, while slides reach D 3.5–4):
   within 3× the darkest rows' level, runs of 80+ rows) are measured, capped at
   D 2, and `--slide-flare` (default 0.5) × (that − the D 3.5 level) is
   subtracted from the raw before the density step.
-- **Frame grid** (`slide_frame_grid`): the detail-based comb of
-  `find_frame_grid` locked onto a wrong pitch (2732) on a strip of mostly
-  dark frames, and the stray light measured at its "gaps" (picture) came out
-  35× too high. Slides now place frames from the black gaps themselves:
-  pitch = median gap spacing (~3180 rows at Base 16 on serial 3054), missing
-  gaps filled in, partial end frames kept when they hold most of a frame;
-  it falls back to `find_frame_grid` with fewer than two gaps. 0.5–0.75 looked right on
+- **Frame grid**: slides use the OEM framing (`tlx_frame_grid`, see
+  Framing below) on the uninverted profile, so the black gaps are the low
+  level, as TLB.dll does for film type 2. The earlier detail-based comb
+  locked onto a wrong pitch (2732) on a strip of mostly dark frames, and the
+  stray light measured at its "gaps" (picture) came out 35× too high.
+  Flare strength: 0.5–0.75 looked right on
   that roll (deeper, neutral shadows, detail kept); 1.0 crushed the shade.
 
 **Silver B&W** (TLB.dll film type 4) goes through the same LUT and NegMatrix
@@ -235,12 +234,19 @@ models were artefacts of a floating row phase and are superseded (commit
 
 ### Framing
 
-`find_frame_grid`: never forces a count. Measures the true frame **pitch** by
-autocorrelation of the per-row detail profile → count = `round(span/pitch)` →
-phase-locked uniform comb → snap each tooth to its gap → drop leader/partial end
-cells. The caller crops a **fixed 3000-px window centred between gaps** (the
-leftover splits evenly as edge margin; per-gap rebate measurement was unreliable).
-In the web flow the detected centres only *seed* the interactive confirmation.
+`tlx_frame_grid` (the OEM method, TLB.dll `FN_iFramePictures`; details in
+`docs/TLB_FINDINGS.md` "Picture framing"): fixed picture length and pitch per
+resolution (Base 16: 3000/3206 rows, Base 8: 2250/2405, Base 4: 1500/1603), an
+inverted per-block brightness profile thresholded from its histogram into
+picture/gap, picture-length runs placed first, missing pictures filled between
+them and extrapolated at the ends. Each crop is anchored at its picture start
+and spans the full sensor width. In the web flow the detected centres only
+*seed* the interactive confirmation.
+
+A width with no OEM entry (e.g. trimmed by the CLI autocrop) takes the
+nearest resolution's geometry. `--format full|half|pano` (the web app's
+Format) scales the picture length and pitch: half frame = half of full
+[assumed], panoramic (XPan) = 5530 / 5736 rows at Base 16.
 
 ## The OEM "Ansel" cascade (the full minilab look — context)
 

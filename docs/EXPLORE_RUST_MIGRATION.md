@@ -74,7 +74,7 @@ likely to introduce subtle regressions:
   (`web/decode.py:62-63`). `ndarray` with custom strides handles this, but the
   ergonomics are worse than numpy's `img[:, 0:n3:3]`.
 - **IR band / zone detection**, **trilinear registration** (`measure_leads`,
-  `register_zones`), **frame-grid autocorrelation** (`find_frame_grid`),
+  `register_zones`), **OEM framing** (`tlx_frame_grid`),
   **Dmin measurement** (`measure_dmin`) — all array reductions, FFTs/correlations,
   percentile ops. numpy's `np.percentile`, `np.correlate`, broadcasting all need
   explicit equivalents (`ndarray-stats`, a correlation/FFT crate like `rustfft`).

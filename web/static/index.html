@@ -235,6 +235,7 @@
     .scan-table td + td, .scan-table th + th { border-left: 2px solid var(--border); }
     .scan-table .col-order { width: 9.5em; }
     .scan-table .col-film { width: 190px; }
+    .scan-table .col-format { width: 150px; }
     .scan-table select { width: 100%; }
     .scan-table .col-act { width: 262px; }      /* Scan + Advance film buttons + gap + padding + shadow */
     /* narrow: one labelled row per cell instead of three squeezed columns */
@@ -591,7 +592,7 @@
   <h2>Scan</h2>
   <table class="scan-table">
     <thead>
-      <tr><th>Work folder</th><th class="col-order">Next order</th><th class="col-film">Film type</th><th class="col-act">Film</th></tr>
+      <tr><th>Work folder</th><th class="col-order">Next order</th><th class="col-film">Film type</th><th class="col-format">Format</th><th class="col-act">Film</th></tr>
     </thead>
     <tbody>
       <tr>
@@ -608,6 +609,13 @@
             <option value="c41">Colour negative</option>
             <option value="bw">B&amp;W (silver)</option>
             <option value="slide">Slide (E-6)</option>
+          </select>
+        </td>
+        <td data-label="Format">
+          <select id="scan-format" aria-label="Picture format">
+            <option value="full">Full frame</option>
+            <option value="half">Half frame</option>
+            <option value="pano">Panoramic</option>
           </select>
         </td>
         <td data-label="Film">
@@ -645,8 +653,9 @@
       on this computer. It is read in place, never copied, and processed right
       away: a preview of the whole strip with the frames found, in a few seconds
       to a minute.</li>
-    <li><strong>Place and export</strong>The roll opens in <b>Frames</b>. Click the strip to start a box there, <kbd>Enter</kbd>
-      adds the next one. Export saves the box positions beside the raw, so
+    <li><strong>Place and export</strong>The roll opens in <b>Frames</b> with a box on every frame
+      found, sized for the <b>Format</b>. Nudge them, <kbd>Enter</kbd> adds one,
+      <kbd>Delete</kbd> removes one. Export saves the box positions beside the raw, so
       opening it again brings them back.</li>
   </ol>
   <div class="raw-slot" id="raw-slot">
@@ -660,6 +669,13 @@
         <option value="c41">Colour negative</option>
         <option value="bw">B&amp;W (silver)</option>
         <option value="slide">Slide (E-6)</option>
+      </select>
+    </label>
+    <label class="field">Format
+      <select id="proc-format" aria-label="Picture format of the raw">
+        <option value="full">Full frame</option>
+        <option value="half">Half frame</option>
+        <option value="pano">Panoramic</option>
       </select>
     </label>
     <button id="raw-open">Open…</button>
@@ -1081,7 +1097,7 @@
     $('scan-prog').value = 0;
     $('scan-log').textContent = '';
     $('feed-prompt').classList.remove('show');
-    await postSSE('/api/scan', { film: $('scan-film').value }, ev => {
+    await postSSE('/api/scan', { film: $('scan-film').value, format: $('scan-format').value }, ev => {
       if (ev.type === 'order') {
         logLine('scan-log', `Order ${ev.order}: ${ev.path}`);
       } else if (ev.type === 'log') {
@@ -1101,6 +1117,7 @@
         if (ev.path) {
           showRaw(ev.path, ev.dx);
           if (ev.film) $('proc-film').value = ev.film;
+          if (ev.format) $('proc-format').value = ev.format;
           showSpace('frames');
           processRaw();
         }
@@ -1215,6 +1232,15 @@
   $('proc-film').addEventListener('change', () => {
     if ($('raw-slot').classList.contains('set')) processRaw();
   });
+  // Picture format: the same, remembered for the scan, followed per raw by
+  // Process; the frames are found and boxed in that format.
+  try { $('scan-format').value = localStorage.getItem('pakon-scan-format') || 'full'; } catch {}
+  $('scan-format').addEventListener('change', () => {
+    try { localStorage.setItem('pakon-scan-format', $('scan-format').value); } catch {}
+  });
+  $('proc-format').addEventListener('change', () => {
+    if ($('raw-slot').classList.contains('set')) processRaw();
+  });
 
   // Open a raw where it is on the host and process it in place; its export
   // saves the frame positions beside it (<raw>.crops.json) for next time.
@@ -1228,6 +1254,7 @@
     if (!resp.ok) { setMsg($('browse-msg'), d.error || 'could not open', 'err'); return; }
     showRaw(d.path, d.dx);
     if (d.film) $('proc-film').value = d.film;
+    $('proc-format').value = d.format || 'full';
     $('browse-modal').classList.add('hidden');
     showSpace('process');   // watch the progress there; Frames opens when done
     processRaw();
@@ -1280,6 +1307,7 @@
     const btn = $('raw-open');
     btn.disabled = true;
     $('proc-film').disabled = true;
+    $('proc-format').disabled = true;
     setBusy('process', true);
     setBusy('frames', true);
     setMsg($('proc-msg'), '');
@@ -1290,7 +1318,8 @@
     resetExport();
     $('frames-grid').innerHTML = '';
 
-    await postSSE('/api/process', { film: $('proc-film').value }, ev => {
+    await postSSE('/api/process', { film: $('proc-film').value,
+                                    format: $('proc-format').value }, ev => {
       if (ev.type === 'progress') {
         $('proc-prog').value = ev.pct;
         $('proc-prog-label').textContent = ev.step;
@@ -1304,7 +1333,7 @@
         showSpace('frames');
         setMsg($('frames-msg'), ev.saved
           ? `Restored ${ev.saved.centres.length} saved frames — adjust or export`
-          : 'Click the strip to place a box — Enter adds the next, Delete removes one', 'ok');
+          : `Found ${crops.length} frame${crops.length === 1 ? '' : 's'} — adjust or export`, 'ok');
       } else if (ev.type === 'error') {
         setMsg($('proc-msg'), ev.message, 'err');
         framesWait('Could not process the roll', ev.message, null);
@@ -1312,21 +1341,23 @@
     });
     btn.disabled = false;
     $('proc-film').disabled = false;
+    $('proc-format').disabled = false;
     setBusy('process', false);
     setBusy('frames', false);
   }
 
   // ── Confirm frames (interactive crop placement) ────────────────────────────
   function startConfirm() {
-    // Restore the boxes saved at this raw's last export, else start with a
-    // single box near the first detected frame; the operator adds the rest
-    // with Enter (and removes with Delete). The full ribbon is shown.
-    const first = (meta.centres && meta.centres.length)
-      ? meta.centres[0] : Math.round(meta.frame_w / 2);
+    // Restore the boxes saved at this raw's last export, else a box on every
+    // detected frame, sized for the roll's format; the operator nudges them,
+    // adds with Enter and removes with Delete. The full ribbon is shown.
+    $('box-size').value = meta.format || 'full';
     const saved = meta.saved;
+    const found = (meta.centres && meta.centres.length)
+      ? meta.centres : [Math.round(meta.frame_w / 2)];
     crops = saved
       ? saved.centres.map((c, i) => ({ c, w: (saved.widths || [])[i] || meta.frame_w }))
-      : [{ c: first, w: boxSize() }];
+      : found.map(c => ({ c, w: meta.frame_w }));
     cur = 0;
     $('strip-img').src = '/api/preview?t=' + Date.now();
     $('frames-wait').classList.add('hidden');
@@ -1368,10 +1399,10 @@
   const pxPerRow = () => meta.scale * zoom;              // full row -> strip px
   const fullToPx = c => c * pxPerRow();
   // Box width (full-res rows) for the size selected in the dropdown.
-  // Full is 3000 (3:2 at 2000 tall), half 1500, panoramic 6000.
-  const BOX_MULT = { full: 1, half: 0.5, pano: 2 };
+  // The server sizes each format for the scan's resolution (meta.box_w; at
+  // Base 16 full 3000, half 1500, panoramic 5530).
   const boxSize = () =>
-    Math.round(meta.frame_w * (BOX_MULT[$('box-size').value] || 1));
+    (meta.box_w && meta.box_w[$('box-size').value]) || meta.frame_w;
 
   function renderStrip() {
     const inner = $('strip-inner');

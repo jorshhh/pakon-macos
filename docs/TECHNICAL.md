@@ -248,7 +248,7 @@ Key decoder options:
 | `--slide` | off | slide film: no inversion; OEM positive path (PosMatrix → `ColRevLut1.pf` → `romm.pf`) |
 | `--jpeg` | off | also write the `rpd.pf`-rendered JPEG (needs `profiles/rpd.pf`) |
 | `--rotate {90,180,270}` | 0 | rotate each output frame |
-| `--frames N` | auto | optional hard override of the auto-detected count |
+| `--format {full,half,pano}` | full | picture format the frames are found and cropped in |
 | `--channel-order {fixed,auto,brg}` | fixed | R/G/B identity after marker alignment (fixed is verified) |
 | `--flat FILE` / `--no-flat` | auto | per-column flat field; default `RAW.flat.json`, else `EEPROM_DIR/flatfield.json` |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
