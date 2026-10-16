@@ -27,6 +27,9 @@ if str(_TOOLS) not in sys.path:
 from pakon_image import (  # noqa: E402
     detect_row_layout,
     find_frame_grid,
+    tlx_frame_grid,
+    tlx_geometry,
+    FRAME_FORMATS,
     invert_c41,
     marker_align,
     measure_dmin,
@@ -222,11 +225,13 @@ def _build_ribbon(raw_path, emit):
 FILMS = ("c41", "bw", "slide")   # colour negative, silver B&W, slide (E-6)
 
 
-def prescan(raw_path, progress=None, film="c41") -> dict:
+def prescan(raw_path, progress=None, film="c41", fmt="full") -> dict:
     """Stage 1. Build + cache the ribbon, render the long preview strip, and
     auto-detect initial frame centres. Returns a metadata dict (all JSON-able).
     film="bw" renders silver B&W: the same inversion, then grey; "slide"
-    renders reversal film through the OEM positive path (no inversion)."""
+    renders reversal film through the OEM positive path (no inversion).
+    fmt (full | half | pano) is the picture format the frames are found and
+    sized for."""
     grey = film == "bw"
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     clear_work()                          # the last roll's frames
@@ -242,10 +247,24 @@ def prescan(raw_path, progress=None, film="c41") -> dict:
     base = measure_dmin(rgb, pct=99.5)
 
     emit("Detecting frames", 0.68)
-    grid = slide_frame_grid(rgb) if film == "slide" else None
-    cut_rows, pitch = grid or find_frame_grid(rgb)
-    centres = [int((cut_rows[i] + cut_rows[i + 1]) // 2)
-               for i in range(len(cut_rows) - 1)]
+    # Box length per format (rows): the OEM geometry for this width, else
+    # multiples of the fixed 3000.
+    box_w = {f: (tlx_geometry(cols, f) or (0, int(_FRAME_W * k[0]), 0))[1]
+             for f, k in FRAME_FORMATS.items()}
+    frame_w = box_w[fmt]
+    # OEM framing (docs/TLB_FINDINGS.md "Picture framing"); for full frames
+    # the gap-centred grid when the width has no OEM geometry or it finds
+    # nothing (that grid only knows full frames).
+    tlx = tlx_frame_grid(rgb, positive=film == "slide", fmt=fmt)
+    centres = []
+    if tlx and tlx[0]:
+        starts, frame_w, pitch = tlx
+        centres = [int(s + frame_w // 2) for s in starts]
+    elif fmt == "full":
+        grid = slide_frame_grid(rgb) if film == "slide" else None
+        cut_rows, pitch = grid or find_frame_grid(rgb)
+        centres = [int((cut_rows[i] + cut_rows[i + 1]) // 2)
+                   for i in range(len(cut_rows) - 1)]
     if not centres:                       # fallback: single image
         centres = [rows // 2]
         pitch = rows
@@ -264,7 +283,7 @@ def prescan(raw_path, progress=None, film="c41") -> dict:
         pos = render_slide(small, *_slide_path(), flare=flare)
     elif oem is not None:                                # OEM colour path
         balance = oem_roll_balance(small, oem[0], oem[1])  # once per roll
-        fw = int(min(_FRAME_W, pitch))
+        fw = int(min(frame_w, pitch))
         shifts = _sba_shifts([rgb[max(0, c - fw // 2):c + fw // 2] for c in centres], oem)
         # The strip gets the roll's mean OEM shift; the export applies each
         # frame's own.
@@ -289,7 +308,9 @@ def prescan(raw_path, progress=None, film="c41") -> dict:
                          [float(x) for x in balance[1]]]),
         "rows": int(rows), "cols": int(cols),
         "pitch": int(pitch),
-        "frame_w": _FRAME_W,
+        "frame_w": int(frame_w),
+        "box_w": box_w,                    # rows per format: full, half, pano
+        "format": fmt,
         "centres": centres,                # initial detected centres (full rows)
         "preview_w": int(prev_w), "preview_h": int(prev_h),
         "scale": float(scale),             # preview_x = full_row * scale

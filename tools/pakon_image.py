@@ -1031,6 +1031,169 @@ def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
     return cut_rows, P * step_r
 
 
+# OEM picture geometry per sensor width (TLB.dll FUN_10011a60): framing block
+# (lines), picture length (lines), pitch (lines). docs/TLB_FINDINGS.md
+# "Picture framing".
+TLX_GEOMETRY = {2000: (8, 3000, 3206), 1500: (6, 2250, 2405), 1000: (4, 1500, 1603)}
+
+# Picture formats: (length, pitch) as a fraction of the full-frame values.
+# TLX has no presets for these; its operator types Width / UnitWidth into
+# "Pre-Scan Framing Adjust". Panoramic (XPan) is 5530 / 5736 at Base 16
+# (pakon-scanning-software XPanPreScan.au3); half frame is half a full frame
+# [assumed, not yet checked on a real roll].
+FRAME_FORMATS = {
+    "full": (1.0, 1.0),
+    "half": (0.5, 0.5),
+    "pano": (5530 / 3000, 5736 / 3206),
+}
+
+
+def tlx_geometry(width, fmt="full"):
+    """(block, length, pitch) in ribbon rows for a sensor width and picture
+    format, or None when the width has no OEM geometry."""
+    geom = TLX_GEOMETRY.get(width)
+    if geom is None:
+        return None
+    block, length, pitch = geom
+    kl, kp = FRAME_FORMATS[fmt]
+    return block, int(round(length * kl)), int(round(pitch * kp))
+
+
+def tlx_profile(ribbon, block, positive=False):
+    """FUN_10006870: one 8-bit (R+G+B)/3 value per block of lines, inverted
+    for negatives so the clear gap is low and the picture high."""
+    n = ribbon.shape[0] // block
+    v = ribbon[:n * block:block].astype(np.float32).mean((1, 2)) / 257.0
+    v = np.clip(v, 0, 255).astype(np.int32)
+    return v if positive else 255 - v
+
+
+def _tlx_threshold(prof):
+    """FUN_10005d20 mode 0: the first significant histogram peak (the gap
+    level) and a cut just above it."""
+    h = np.bincount(prof, minlength=256)
+    floor = len(prof) // 150
+    peak = pk = 0
+    for i in range(0xfa + 2):
+        if pk > floor and h[i] < pk * 3 // 5:
+            break
+        if h[i] > pk:
+            pk, peak = int(h[i]), i
+    lo = peak
+    while lo and h[lo] >= pk // 20:
+        lo -= 1
+    hi, top = peak, min(255, peak + 50)
+    while hi < top and h[hi] >= pk // 10:
+        hi += 1
+    if (peak - lo) * 4 < hi - peak:
+        t = peak
+        while t < 255 and h[t] >= pk // 2:
+            t += 1
+        return t
+    return hi + (hi - peak) // 2
+
+
+def _tlx_runs(ones):
+    d = np.diff(np.concatenate([[0], ones, [0]]))
+    s, e = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    return list(zip(s.tolist(), (e - s).tolist()))
+
+
+def tlx_place(prof, plen, pitch):
+    """FN_iFramePicturesSub + FN_iFramingFindPictures on a block profile.
+    Returns picture starts in blocks (sorted), each `plen` blocks long."""
+    lo, hi = plen * 95 // 100, plen * 115 // 100
+
+    def good(t):
+        return sum(lo < l < hi for _, l in _tlx_runs(prof > t))
+
+    # Threshold sweep: +2 / -2 steps while the count of picture-length runs
+    # does not drop; keep the best.
+    t0 = _tlx_threshold(prof)
+    best_n, best_t = good(t0), t0
+    for step in (2, -2):
+        t = t0
+        while 1 <= t + step <= 0xff:
+            t += step
+            g = good(t)
+            if g < best_n:
+                break
+            if g > best_n:
+                best_n, best_t = g, t
+    ones = (prof > best_t).astype(np.int32)
+    n = len(ones)
+    pics = {}                                     # slot (half pitch) -> start
+
+    def put(p):
+        pics.setdefault(p * 2 // pitch, p)
+
+    # LookForNicePictures: whole pictures, and two pictures with a lost gap.
+    # The excess length is split 1/3 before, 2/3 after.
+    for s, l in _tlx_runs(ones):
+        if lo < l < hi:
+            put(s + (l - plen) // 3)
+        elif lo + pitch < l < hi + pitch:
+            put(s + (l - pitch - plen) // 3)
+            put(s + pitch)
+    if not pics:                                  # FramingBlindlyPlacePictures
+        off = (pitch - plen) // 2
+        return [off + k * pitch for k in range(max(0, (n - 4) // pitch))]
+
+    # LookInBetweenEnds: evenly fill the pictures missing between two found.
+    found = sorted(pics.values())
+    for a, b in zip(found, found[1:]):
+        span = b - a
+        k = span // pitch
+        if span - k * pitch < pitch // 4:
+            k -= 1
+        for j in range(1, k + 1):
+            put(a + j * span // (k + 1))
+
+    # LookAtEnd / LookAtBeginning: one pitch outward at a time; place the
+    # picture where a plen window holds the most film (FUN_100064e0), stop
+    # when there is no film left.
+    gap = max(1, pitch - plen)
+    cum = np.concatenate([[0], np.cumsum(ones)])
+
+    def estimate(start):
+        best = None
+        for k in range(gap):
+            p = start + k
+            if p < 0 or p + plen > n:
+                continue
+            key = (int(cum[p + plen] - cum[p]), -abs(k - gap // 2))
+            if best is None or key > best[0]:
+                best = (key, p)
+        if best is None or best[0][0] < plen // 2:
+            return None
+        return best[1]
+
+    last = max(pics.values())
+    while (q := estimate(last + plen + gap // 2)) is not None and q > last:
+        put(q)
+        last = q
+    first = min(pics.values())
+    while (q := estimate(first - pitch - gap // 2)) is not None and q < first:
+        put(q)
+        first = q
+    return sorted(set(pics.values()))
+
+
+def tlx_frame_grid(ribbon, positive=False, fmt="full"):
+    """OEM (TLX) framing. Returns (starts, length, pitch) in ribbon rows:
+    each picture is rows [start, start + length). `fmt` is a FRAME_FORMATS
+    key. None when the sensor width has no OEM geometry."""
+    geom = tlx_geometry(ribbon.shape[1], fmt)
+    if geom is None:
+        return None
+    block, length, pitch = geom
+    starts = tlx_place(tlx_profile(ribbon, block, positive),
+                       length // block, pitch // block)
+    rows = ribbon.shape[0]
+    starts = [min(max(0, s * block), max(0, rows - length)) for s in starts]
+    return sorted(set(starts)), length, pitch
+
+
 def write_preview(rgb16, path, maxdim=1000):
     try:
         from PIL import Image
@@ -1077,6 +1240,9 @@ def main():
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
     ap.add_argument("--frames", type=int, default=None,
                     help="split into N frames (default: auto-detect from valley count)")
+    ap.add_argument("--format", choices=sorted(FRAME_FORMATS), default="full",
+                    help="picture format for the OEM framing: full, half (half "
+                         "frame) or pano (XPan panoramic); default full")
     ap.add_argument("--crop-width", type=int,
                     help="keep only this many px of width (drop blank overscan)")
     ap.add_argument("--autocrop", action=argparse.BooleanOptionalAction,
@@ -1311,20 +1477,28 @@ def main():
 
     rot = (args.rotate // 90) % 4
 
-    # Auto-detected frame grid (count never forced; see find_frame_grid).
-    grid = slide_frame_grid(rgb) if args.slide and not args.frames else None
-    cut_rows, pitch = grid or find_frame_grid(rgb, args.frames)
-    fr = max(0, len(cut_rows) - 1)
-    # Trust the detected boundaries; crop a FIXED width (3000 px, capped at the
-    # pitch) centred between each pair of gaps so the leftover splits evenly as
-    # edge margin and the rebate stays off both edges. Variable per-gap trimming
-    # is unreliable, so everything is the same width.
-    frame_w = min(3000, pitch)
+    # OEM framing (fixed picture length and pitch per resolution, crops
+    # anchored at each picture's start); the gap-centred grid when the width
+    # has no OEM geometry or --frames forces a count.
+    tlx = (None if args.frames else
+           tlx_frame_grid(rgb, positive=args.slide, fmt=args.format))
+    if tlx and len(tlx[0]) > 1:
+        starts, frame_w, pitch = tlx
+        cut_rows = [s + frame_w // 2 for s in starts]    # picture centres
+        centred = True
+    else:
+        grid = slide_frame_grid(rgb) if args.slide and not args.frames else None
+        cut_rows, pitch = grid or find_frame_grid(rgb, args.frames)
+        # Fixed width (3000, capped at the pitch) centred between gaps.
+        frame_w = min(3000, pitch)
+        centred = False
+    fr = len(cut_rows) if centred else max(0, len(cut_rows) - 1)
     if fr <= 1:
-        cut_rows, fr, frame_w = [0, rgb.shape[0]], 1, None
+        cut_rows, fr, frame_w, centred = [0, rgb.shape[0]], 1, None, False
         print("single frame")
     else:
-        print(f"frame grid: pitch={pitch} rows, {fr} frames")
+        print(f"frame grid: {'OEM ' if centred else ''}pitch={pitch} rows, "
+              f"{fr} frames")
     flare = None
     if slide is not None:
         flare = measure_slide_flare(rgb, args.slide_flare)
@@ -1335,7 +1509,8 @@ def main():
         if frame_w is None:
             r_start, r_end = cut_rows[i], cut_rows[i + 1]
         else:
-            centre = (cut_rows[i] + cut_rows[i + 1]) // 2
+            centre = (cut_rows[i] if centred
+                      else (cut_rows[i] + cut_rows[i + 1]) // 2)
             r_start = max(0, centre - frame_w // 2)
             r_end = min(rgb.shape[0], r_start + frame_w)
             r_start = max(0, r_end - frame_w)

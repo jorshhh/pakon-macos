@@ -235,12 +235,18 @@ models were artefacts of a floating row phase and are superseded (commit
 
 ### Framing
 
-`find_frame_grid`: never forces a count. Measures the true frame **pitch** by
-autocorrelation of the per-row detail profile → count = `round(span/pitch)` →
-phase-locked uniform comb → snap each tooth to its gap → drop leader/partial end
-cells. The caller crops a **fixed 3000-px window centred between gaps** (the
-leftover splits evenly as edge margin; per-gap rebate measurement was unreliable).
-In the web flow the detected centres only *seed* the interactive confirmation.
+`tlx_frame_grid` (the OEM method, TLB.dll `FN_iFramePictures`; details in
+`docs/TLB_FINDINGS.md` "Picture framing"): fixed picture length and pitch per
+resolution (Base 16: 3000/3206 rows, Base 8: 2250/2405, Base 4: 1500/1603), an
+inverted per-block brightness profile thresholded from its histogram into
+picture/gap, picture-length runs placed first, missing pictures filled between
+them and extrapolated at the ends. Each crop is anchored at its picture start
+and spans the full sensor width. In the web flow the detected centres only
+*seed* the interactive confirmation.
+
+`find_frame_grid` (autocorrelation pitch → phase-locked comb → fixed 3000-px
+window centred between gaps) remains the fallback for widths with no OEM
+geometry and for `--frames N`.
 
 ## The OEM "Ansel" cascade (the full minilab look — context)
 
